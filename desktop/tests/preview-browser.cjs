@@ -12,6 +12,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asgard-preview-'));
 const output = path.resolve(__dirname, '../../test_reports/preview-browser');
 const dist = path.resolve(__dirname, '../../frontend/dist-preview');
 fs.mkdirSync(output, { recursive: true });
+fs.mkdirSync(path.join(root, 'browser'));
 app.setPath('userData', path.join(root, 'browser'));
 let backend, server, win, done = false;
 const requests = [], logs = [];
