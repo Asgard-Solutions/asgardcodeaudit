@@ -24,10 +24,7 @@ if ($null -eq $window) {
     foreach ($item in $top) {
         $records += @{name=$item.Current.Name; process=$item.Current.ProcessId; class=$item.Current.ClassName; handle=$item.Current.NativeWindowHandle}
     }
-    $owned = [System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $processCondition)
-    $ownedNames = @()
-    foreach ($item in $owned) { $ownedNames += @{name=$item.Current.Name; type=$item.Current.ControlType.ProgrammaticName; class=$item.Current.ClassName} }
-    [Console]::Error.WriteLine((@{owner=$OwnerPid; windows=$records; owned=$ownedNames} | ConvertTo-Json -Depth 5 -Compress))
+    [Console]::Error.WriteLine((@{owner=$OwnerPid; windows=$records} | ConvertTo-Json -Depth 5 -Compress))
     throw 'The owned native folder dialog was not found in the automation tree.'
 }
 $shell = New-Object -ComObject WScript.Shell
@@ -44,9 +41,17 @@ if ($Folder -match '[+^%~(){}\[\]]') { throw 'Unsupported metacharacter in the s
 [System.Windows.Forms.SendKeys]::SendWait($Folder)
 [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
 Start-Sleep -Milliseconds 800
-$buttonCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, 'Select Folder')
+$buttonName = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, 'Select Folder')
+$buttonType = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+$buttonCondition = [System.Windows.Automation.AndCondition]::new($buttonName, $buttonType)
 $button = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
-if ($null -eq $button) { throw 'The Select Folder button was not found.' }
-$invoke = $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-$invoke.Invoke()
+if ($null -eq $button) { throw 'The Select Folder button control was not found.' }
+$invoke = $null
+if ($button.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
+    $invoke.Invoke()
+} else {
+    # Some native button providers expose keyboard activation instead of Invoke.
+    $button.SetFocus()
+    [System.Windows.Forms.SendKeys]::SendWait(' ')
+}
 Write-Output 'Native dialog selected the synthetic fixture.'
