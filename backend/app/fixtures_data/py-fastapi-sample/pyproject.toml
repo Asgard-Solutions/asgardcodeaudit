@@ -1,0 +1,7 @@
+[project]
+name = "synthetic-fastapi-sample"
+version = "0.0.1"
+requires-python = ">=3.11"
+dependencies = ["fastapi", "uvicorn"]
+
+# Synthetic fixture for Asgard CodeAudit preview. Not real production code.
