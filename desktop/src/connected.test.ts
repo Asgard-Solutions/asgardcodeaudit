@@ -2,24 +2,24 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import {
-  isTrustedFrame,
-  resolveOperation,
-  validateBody,
-  ipcOk,
-  ipcFail,
-  IpcValidationError,
-  type IpcResult,
-} from "./ipc";
+  registerIpcHandlers,
+  type RuntimeCtx,
+  type IpcMainLike,
+  type IpcEventLike,
+  type SenderLike,
+} from "./app-runtime";
+import { IPC, type IpcResult } from "./ipc";
 import { APP_ORIGIN, APP_LAUNCH_URL } from "./protocol";
+import { Lifecycle, type LifecycleBackend } from "./lifecycle";
 
-// CONNECTED boundary test for the desktop application frame + IPC.
+// CONNECTED boundary test that invokes the ACTUAL production handler registration
+// (`registerIpcHandlers`), the real allow-list/sender/envelope logic in ipc.ts,
+// and a real `Lifecycle` for recovery — against a REAL loopback HTTP backend.
 //
-// It uses the REAL ipc.ts sender validation, operation allow-list, body
-// validation and result envelope, wired to a REAL loopback HTTP backend.
-//
-// SUBSTITUTION (labeled): Electron's ipcMain/net.fetch and BrowserWindow are
-// MODELLED by the handlers below and Node's fetch. Native window/frame identity
-// and the real net stack are Windows/GUI gates and are NOT exercised here.
+// SUBSTITUTION (labeled): only the external runtime boundaries are faked —
+// electron `ipcMain` (a recorder), `net.fetch` (Node fetch), `dialog`, and the
+// window WebContents/senderFrame identity. Native Electron window/net behaviour
+// (Windows/GUI gates) is NOT exercised.
 
 let server: http.Server;
 let baseUrl = "";
@@ -37,8 +37,6 @@ beforeAll(async () => {
       res.end(JSON.stringify({ detail: { message: "Not authenticated", code: "unauthenticated" } }));
     } else if (url === "/api/v1/build") {
       res.end(JSON.stringify({ name: "Asgard CodeAudit" }));
-    } else if (url === "/api/v1/diagnostics") {
-      res.end(JSON.stringify({ mode: "desktop" }));
     } else if (url === "/api/v1/projects" && req.method === "GET") {
       res.end(JSON.stringify([]));
     } else if (url === "/api/v1/projects" && req.method === "POST") {
@@ -56,122 +54,158 @@ beforeAll(async () => {
 
 afterAll(() => server.close());
 
-// Mirrors main.ts callBackend: never leaks raw bodies; sanitized envelope out.
-async function callBackend<T>(method: string, path: string, body?: unknown): Promise<IpcResult<T>> {
-  const res = await fetch(`${baseUrl}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await res.text();
-  let data: unknown;
-  try {
-    data = text ? JSON.parse(text) : undefined;
-  } catch {
-    return ipcFail("The backend returned a malformed response.", 502, "malformed_response");
-  }
-  if (!res.ok) {
-    const detail = (data as { detail?: unknown })?.detail as { message?: string; code?: string } | string | undefined;
-    const message = typeof detail === "object" ? detail?.message ?? `failed ${res.status}` : (detail ?? `failed ${res.status}`);
-    const code = typeof detail === "object" ? detail?.code : undefined;
-    return ipcFail(message, res.status, code);
-  }
-  return ipcOk(data as T);
+// Recording fake ipcMain that lets us invoke the registered production handlers.
+function makeHarness(ctx: RuntimeCtx) {
+  const invokeHandlers = new Map<string, (e: IpcEventLike, ...a: unknown[]) => unknown>();
+  const onHandlers = new Map<string, (e: IpcEventLike, ...a: unknown[]) => void>();
+  const ipcMain: IpcMainLike = {
+    handle: (ch, fn) => invokeHandlers.set(ch, fn),
+    on: (ch, fn) => onHandlers.set(ch, fn),
+  };
+  registerIpcHandlers(ipcMain, ctx);
+  return {
+    invoke: (ch: string, e: IpcEventLike, ...a: unknown[]) => invokeHandlers.get(ch)!(e, ...a),
+    emit: (ch: string, e: IpcEventLike, ...a: unknown[]) => onHandlers.get(ch)!(e, ...a),
+  };
 }
 
-// Mirrors the main.ts REQUEST handler (sender validation + allow-list + envelope).
-async function handleRequest(senderUrl: string | undefined, isMainFrame: boolean, method: string, path: string, body?: unknown): Promise<IpcResult<unknown>> {
-  if (!isTrustedFrame(senderUrl, isMainFrame, APP_ORIGIN)) return ipcFail("Rejected: untrusted sender.", 403, "untrusted_sender");
-  try {
-    const op = resolveOperation(method, path);
-    const valid = validateBody(op, body);
-    return await callBackend(op.method, path, valid);
-  } catch (e) {
-    if (e instanceof IpcValidationError) return ipcFail(e.message, 400, "ipc_validation");
-    return ipcFail("The request could not be processed.", 500, "ipc_error");
-  }
+const mainSender: SenderLike = { send: () => {} };
+function frame(url: string, isMain = true): IpcEventLike {
+  return { sender: mainSender, senderFrame: { url, parent: isMain ? null : {} } };
 }
 
-async function handleHandshake(senderUrl: string | undefined, isMainFrame: boolean): Promise<IpcResult<unknown>> {
-  if (!isTrustedFrame(senderUrl, isMainFrame, APP_ORIGIN)) return ipcFail("Rejected: untrusted sender.", 403, "untrusted_sender");
-  return callBackend("GET", "/api/v1/startup/handshake");
+function baseCtx(overrides: Partial<RuntimeCtx> = {}): RuntimeCtx {
+  return {
+    getBackend: () => ({ host: "127.0.0.1", port: Number(new URL(baseUrl).port), secret }),
+    getMainSender: () => mainSender,
+    fetchImpl: (u, init) => fetch(u, init),
+    openDirectory: async () => ({ canceled: false, filePaths: ["/picked/folder"] }),
+    retry: async () => ({ status: "ready", name: "Asgard CodeAudit" }),
+    getUnavailableStatus: () => null,
+    ...overrides,
+  };
 }
 
 const PID = "b".repeat(32);
 
-describe("launch -> route navigation keeps required IPC access", () => {
-  const routes = [
-    { url: APP_LAUNCH_URL, label: "Overview (launch /)" },
-    { url: `${APP_ORIGIN}/projects`, label: "Projects" },
-    { url: `${APP_ORIGIN}/projects/${PID}/settings`, label: "Project Settings" },
-    { url: `${APP_ORIGIN}/diagnostics`, label: "Diagnostics" },
-  ];
-
-  it("startup handshake succeeds from the launch frame via the dedicated channel", async () => {
-    const r = await handleHandshake(APP_LAUNCH_URL, true);
+describe("real production handlers: launch + route navigation keep IPC access", () => {
+  it("dedicated handshake succeeds from the launch frame", async () => {
+    const h = makeHarness(baseCtx());
+    const r = (await h.invoke(IPC.HANDSHAKE, frame(APP_LAUNCH_URL))) as IpcResult<{ name: string }>;
     expect(r.ok).toBe(true);
-    if (r.ok) expect((r.data as { name: string }).name).toBe("Asgard CodeAudit");
+    if (r.ok) expect(r.data.name).toBe("Asgard CodeAudit");
   });
 
-  for (const route of routes) {
-    it(`every valid application route retains data IPC access: ${route.label}`, async () => {
-      expect(isTrustedFrame(route.url, true, APP_ORIGIN)).toBe(true);
-      const list = await handleRequest(route.url, true, "GET", "/api/v1/projects");
-      expect(list.ok).toBe(true);
-      const build = await handleRequest(route.url, true, "GET", "/api/v1/build");
-      expect(build.ok).toBe(true);
-      const create = await handleRequest(route.url, true, "POST", "/api/v1/projects", { name: "x", path: "/p" });
-      expect(create.ok).toBe(true);
-      const one = await handleRequest(route.url, true, "GET", `/api/v1/projects/${PID}`);
-      expect(one.ok).toBe(true);
+  for (const [label, url] of [
+    ["Overview (/)", APP_LAUNCH_URL],
+    ["Projects", `${APP_ORIGIN}/projects`],
+    ["Settings", `${APP_ORIGIN}/projects/${PID}/settings`],
+    ["Diagnostics", `${APP_ORIGIN}/diagnostics`],
+  ] as const) {
+    it(`data IPC retained on ${label}`, async () => {
+      const h = makeHarness(baseCtx());
+      for (const [m, p, b] of [
+        ["GET", "/api/v1/projects", undefined],
+        ["GET", "/api/v1/build", undefined],
+        ["POST", "/api/v1/projects", { name: "x", path: "/p" }],
+        ["GET", `/api/v1/projects/${PID}`, undefined],
+      ] as const) {
+        const r = (await h.invoke(IPC.REQUEST, frame(url), { method: m, path: p, body: b })) as IpcResult<unknown>;
+        expect(r.ok).toBe(true);
+      }
     });
   }
 });
 
-describe("rejections at the boundary", () => {
-  it("rejects a subframe of the approved origin", async () => {
-    const r = await handleRequest(`${APP_ORIGIN}/projects`, false, "GET", "/api/v1/projects");
-    expect(r).toMatchObject({ ok: false, error: { code: "untrusted_sender", status: 403 } });
-  });
-
-  it("rejects another window / unapproved authority / other scheme", async () => {
-    for (const u of ["app://evil/index.html", "http://asgard/index.html", "app://asgard:9/x", "file:///x"]) {
-      const r = await handleRequest(u, true, "GET", "/api/v1/projects");
+describe("real production handlers: boundary rejections", () => {
+  it("rejects subframe, other authority/scheme/port, unapproved op, and handshake-on-request", async () => {
+    const h = makeHarness(baseCtx());
+    const sub = (await h.invoke(IPC.REQUEST, frame(`${APP_ORIGIN}/projects`, false), { method: "GET", path: "/api/v1/projects" })) as IpcResult<unknown>;
+    expect(sub).toMatchObject({ ok: false, error: { code: "untrusted_sender", status: 403 } });
+    for (const u of ["app://evil/index.html", "http://asgard/x", "app://asgard:9/x", "file:///x"]) {
+      const r = (await h.invoke(IPC.REQUEST, frame(u), { method: "GET", path: "/api/v1/projects" })) as IpcResult<unknown>;
       expect(r).toMatchObject({ ok: false, error: { code: "untrusted_sender" } });
     }
+    const badOp = (await h.invoke(IPC.REQUEST, frame(`${APP_ORIGIN}/projects`), { method: "DELETE", path: "/api/v1/build" })) as IpcResult<unknown>;
+    expect(badOp).toMatchObject({ ok: false, error: { code: "ipc_validation", status: 400 } });
+    const hsOnReq = (await h.invoke(IPC.REQUEST, frame(APP_LAUNCH_URL), { method: "GET", path: "/api/v1/startup/handshake" })) as IpcResult<unknown>;
+    expect(hsOnReq).toMatchObject({ ok: false, error: { code: "ipc_validation" } });
   });
 
-  it("rejects an unapproved operation from a legitimate route", async () => {
-    const r = await handleRequest(`${APP_ORIGIN}/projects`, true, "DELETE", "/api/v1/build");
-    expect(r).toMatchObject({ ok: false, error: { code: "ipc_validation", status: 400 } });
-  });
-
-  it("rejects the public handshake on the generic request channel", async () => {
-    const r = await handleRequest(APP_LAUNCH_URL, true, "GET", "/api/v1/startup/handshake");
-    expect(r).toMatchObject({ ok: false, error: { code: "ipc_validation" } });
+  it("rejects a request from another window (different sender)", async () => {
+    const h = makeHarness(baseCtx());
+    const otherWindow: IpcEventLike = { sender: { send: () => {} }, senderFrame: { url: APP_LAUNCH_URL, parent: null } };
+    const r = (await h.invoke(IPC.REQUEST, otherWindow, { method: "GET", path: "/api/v1/projects" })) as IpcResult<unknown>;
+    expect(r).toMatchObject({ ok: false, error: { code: "untrusted_sender" } });
   });
 });
 
-describe("structured error envelope across the boundary (item 5)", () => {
-  it("carries message + status + code for a failed authenticated request", async () => {
-    // force a 401 by mirroring the handler but with a wrong secret path: use an
-    // unknown project id that the backend 404s, and a bad-auth call directly.
-    const res = await fetch(`${baseUrl}/api/v1/build`, { headers: { Authorization: "Bearer wrong" } });
-    expect(res.status).toBe(401);
-    const bad = await (async (): Promise<IpcResult<unknown>> => {
-      const r = await fetch(`${baseUrl}/api/v1/build`, { headers: { Authorization: "Bearer wrong" } });
-      const data = JSON.parse((await r.text()) || "{}");
-      const d = data.detail as { message?: string; code?: string };
-      return r.ok ? ipcOk(data) : ipcFail(d.message ?? "", r.status, d.code);
-    })();
-    expect(bad).toMatchObject({ ok: false, error: { message: "Not authenticated", status: 401, code: "unauthenticated" } });
+describe("real production handlers: structured error envelope", () => {
+  it("preserves status/code across the boundary and bounds backend errors", async () => {
+    // backend rejects auth -> 401 with code; build a ctx whose backend secret is wrong
+    const wrong = makeHarness(baseCtx({ getBackend: () => ({ host: "127.0.0.1", port: Number(new URL(baseUrl).port), secret: "nope" }) }));
+    const unauth = (await wrong.invoke(IPC.REQUEST, frame(APP_LAUNCH_URL), { method: "GET", path: "/api/v1/build" })) as IpcResult<unknown>;
+    expect(unauth).toMatchObject({ ok: false, error: { message: "Not authenticated", status: 401, code: "unauthenticated" } });
+
+    const h = makeHarness(baseCtx());
+    const validation = (await h.invoke(IPC.REQUEST, frame(APP_LAUNCH_URL), { method: "POST", path: "/api/v1/projects", body: { bogus: 1 } })) as IpcResult<unknown>;
+    expect(validation).toMatchObject({ ok: false, error: { code: "ipc_validation" } });
+    const notFound = (await h.invoke(IPC.REQUEST, frame(APP_LAUNCH_URL), { method: "GET", path: "/api/v1/preview/fixtures" })) as IpcResult<unknown>;
+    expect(notFound.ok).toBe(false);
+    if (!notFound.ok) expect(notFound.error.status).toBe(404);
   });
 
-  it("maps validation failures, duplicate/backend errors and 404s to bounded messages", async () => {
-    const validation = await handleRequest(APP_LAUNCH_URL, true, "POST", "/api/v1/projects", { bogus: 1 });
-    expect(validation).toMatchObject({ ok: false, error: { code: "ipc_validation" } });
-    const notFound = await handleRequest(APP_LAUNCH_URL, true, "GET", "/api/v1/preview/fixtures");
-    expect(notFound.ok).toBe(false); // backend 404 -> bounded failure, no raw body
-    if (!notFound.ok) expect(notFound.error.status).toBe(404);
+  it("returns backend_unavailable when no backend is owned", async () => {
+    const h = makeHarness(baseCtx({ getBackend: () => null }));
+    const r = (await h.invoke(IPC.REQUEST, frame(APP_LAUNCH_URL), { method: "GET", path: "/api/v1/projects" })) as IpcResult<unknown>;
+    expect(r).toMatchObject({ ok: false, error: { code: "backend_unavailable", status: 503 } });
+  });
+});
+
+describe("real production handlers: retry + subscribe wired to a real Lifecycle", () => {
+  function fakeBackend(): LifecycleBackend & { triggerExit: () => void } {
+    const cbs: Array<() => void> = [];
+    return {
+      stop: async () => {},
+      recentLogs: () => "",
+      onExit: (cb) => cbs.push(cb),
+      triggerExit: () => cbs.forEach((c) => c()),
+    };
+  }
+
+  it("RETRY_BACKEND invokes the controller recovery and returns a typed ok envelope", async () => {
+    const first = fakeBackend();
+    const second = fakeBackend();
+    let n = 0;
+    const lifecycle = new Lifecycle({
+      createWindow: () => {},
+      destroyWindow: () => {},
+      startBackend: async () => (++n === 1 ? first : second),
+      loadAppAndShow: async () => {},
+      fetchHandshake: async () => ({ status: "ready", name: "Asgard CodeAudit", version: "0.1.0", source_revision: null, mode: "desktop" }),
+      showStartupErrorDialog: async () => false,
+      notifyUnavailable: () => {},
+      quit: () => {},
+    });
+    await lifecycle.boot();
+    first.triggerExit(); // -> unavailable
+
+    let sent: unknown = null;
+    const capturing: SenderLike = { send: (_ch, s) => (sent = s) };
+    const ctx = baseCtx({
+      getMainSender: () => capturing,
+      retry: () => lifecycle.retry(),
+      getUnavailableStatus: () => lifecycle.getUnavailableStatus(),
+    });
+    const h = makeHarness(ctx);
+
+    // subscribe replay delivers the retained crash status to the trusted sender
+    h.emit(IPC.BACKEND_SUBSCRIBE, { sender: capturing, senderFrame: { url: APP_LAUNCH_URL, parent: null } });
+    expect(sent).toMatchObject({ reason: "crashed" });
+
+    const r = (await h.invoke(IPC.RETRY_BACKEND, { sender: capturing, senderFrame: { url: APP_LAUNCH_URL, parent: null } })) as IpcResult<{ name: string }>;
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.data.name).toBe("Asgard CodeAudit");
+    expect(lifecycle.getState()).toBe("ready");
   });
 });

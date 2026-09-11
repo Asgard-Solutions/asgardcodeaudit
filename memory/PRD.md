@@ -60,5 +60,24 @@ NOT close Windows gates G-1..G-4. Preview headless GUI boot is a pre-existing en
 (reproduces at fork baseline with changes stashed); backend verified via curl. See
 docs/IMPLEMENTATION_STATUS.md §5 for the full finding→files→tests mapping.
 
+## Phase 1 correction pass 4 — lifecycle coordination (2026-09-11)
+Fixed five reproduced concurrency failures in `desktop/src/lifecycle.ts` with one
+coordinated owner of cancellation/cleanup/state: shutdown JOINS the in-flight
+starter (`startTask`) and the actual owned-child cleanup (`cleanupPromise`) and
+stays pending until cleanup finishes (a cleared handle ≠ completed cleanup);
+`ready` is published only after an identity+cancellation+terminal-state+liveness
+guard at both final points (post renderer-load; post recovery-handshake); an
+unexpected exit of the CURRENT attempt is retained even while starting/recovering
+(later subscriber still gets it); deliberate/superseded exits ignored via
+epoch/tornDown; recovery handshake bounded+cancellable. Extracted the real IPC
+wiring to `desktop/src/app-runtime.ts` so `connected.test.ts` drives the REAL
+`registerIpcHandlers` (no re-implemented allow-list). Evidence (2026-09-11, testing
+agent iteration_2.json): desktop vitest **53 passed** (Node 24.21.0), backend pytest
+**24 passed** (Python 3.13.15), build clean, preload 0 local require. Lock hashes in
+IMPLEMENTATION_STATUS §6. Preview real-browser boot remains UNVERIFIED (cross-origin
+ingress hostname mismatch: browser host `...cluster-11.preview.emergentcf.cloud` vs
+`REACT_APP_BACKEND_URL ...preview.emergentagent.com`); origin/isolation/allow-list/auth
+NOT weakened. Windows gates G-1..G-4 still open.
+
 ## Phase 1 correction pass 2 (2026-06)
 Desktop foundation hardened: esbuild-bundled sandbox preload (no local require); custom `app://` protocol serving packaged assets (traversal-rejecting, SPA fallback), CSP scoped to app origin; backend readiness now validates schema identity + authenticated probe with per-request abort + overall deadline, handles spawn/early-exit/EPIPE/cancel, redacted bounded logs, idempotent stop, retry without window/child accumulation; IPC changed from path-prefix to explicit operation allow-list + body validation + exact main-frame/origin sender check; preview origin policy now same-origin + exact allow-list (no suffix wildcard/blanket localhost); invalid ASGARD_MODE raises (no silent preview). Desktop-mode build verified to exclude preview code (0 hits). Lockfiles: backend/uv.lock, frontend/package-lock.json, desktop/package-lock.json. Tests: backend 24 (3.11+3.13), desktop vitest 19, frontend vitest 6. Windows/Electron gates G-1..G-4 remain not-natively-run.

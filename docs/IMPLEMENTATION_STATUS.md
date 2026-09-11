@@ -209,3 +209,75 @@ pass. Backend endpoints were verified working via `curl` (handshake/dev-session 
 verified by the jsdom connected test above rather than by the headless preview GUI.
 
 **Known failures:** none in the automated suites.
+
+---
+
+## 6. Phase 1 correction pass 3 — lifecycle coordination (2026-09-11)
+
+Independent review reproduced FIVE concurrency failures in `desktop/src/lifecycle.ts`
+(labeled controller substitutions, not native Windows). All reproduced first, each
+kept open until its regression passed.
+
+**Fix — one coordinated owner of cancellation, cleanup, and state publication**
+(`desktop/src/lifecycle.ts`): shutdown now JOINS the in-flight start attempt
+(`startTask`) AND the actual owned-child cleanup (`cleanupPromise`) — a cleared
+handle is never treated as completed cleanup; shutdown stays pending until cleanup
+finishes and is idempotent. `ready` is published only after an attempt-identity +
+cancellation + terminal-state + current-attempt-liveness guard (`canPublishReady`)
+at BOTH final publication points (after renderer load; after the recovery
+handshake). An unexpected exit of the CURRENT attempt is retained (`failedEpochExit`
++ `unavailableStatus`) even while starting/recovering, so a later-subscribing
+renderer still receives the failure; deliberate teardown and superseded-attempt
+exits are ignored (`tornDownEpochs` / epoch). The recovery handshake is now bounded
++ cancellable (`fetchHandshake(signal)` in `desktop/src/main.ts`).
+
+Reproduced cases → regression tests (all pass, `desktop/src/lifecycle.test.ts`):
+- **A** shutdown pending until a starter (child not yet returned) finishes reaping.
+- **B** concurrent shutdown joins recovery's in-flight cleanup (deferred stop).
+- **C** a handshake released AFTER shutdown completes does not revive `ready`.
+- **D** current backend exits during renderer loading → `unavailable`, not `ready`.
+- **E** replacement exits during the recovery handshake → recovery not `ready`.
+
+**Production wiring under test (review item 3).** IPC handler registration,
+allow-list, sender-origin validation and the error envelope were extracted to
+`desktop/src/app-runtime.ts` and are used by BOTH `main.ts` and the connected test.
+`desktop/src/connected.test.ts` now drives the REAL `registerIpcHandlers` via a
+recording fake `ipcMain` + real loopback HTTP + a real `Lifecycle` (retry/subscribe),
+using deferred ops — no re-implemented allow-list/handler logic.
+
+**Evidence (executed 2026-09-11; independently re-run by the testing agent →
+`/app/test_reports/iteration_2.json`):**
+- Desktop **vitest 53 passed**, Node **24.21.0** (`/opt/node24`): lifecycle 16,
+  connected 10, backend-process 10, ipc 11, protocol 6. `yarn build` (esbuild +
+  `tsc --noEmit`) pass; `dist/preload.js` 0 local `require`.
+- Backend **pytest 24 passed**, Python **3.13.15**:
+  `env -u VIRTUAL_ENV uv run --frozen --group test --python 3.13 python -m pytest tests/ --ignore=tests/test_external_preview.py`.
+  Python 3.11 not runnable (project pins `requires-python>=3.13`; uv refuses — a real
+  blocker, recorded not silently skipped). `python -m pytest` (module form) required
+  so `app` imports.
+
+**Handoff lockfiles (sha256, bytes) — actual files in-repo:**
+- `backend/uv.lock` — `cfc875a3d1049ea01255bc8711fea9f572e7d68e7d9ff83e7ef8548266079608` (70984)
+- `frontend/package-lock.json` — `14ed607ea37805eaa38b60332789f76153613639b0d9be2b8e0f968b277ad1db` (176653)
+- `desktop/package-lock.json` — `97d92af56faef7b1a9ce4979b17e4fe82a70d276bd52a76c92ec177bf2bcb7ee` (91464)
+
+**Preview boot investigation (review item 4) — accurate status.** The page HTML/JS
+loads (React renders the loading screen) in build mode `preview`; backend endpoints
+respond **200** to server-side and public `curl` (`/api/v1/startup/handshake`,
+`POST /api/v1/dev/session`). The headless automation browser's boot fetch does not
+complete, and it reproduces at the fork baseline with the correction changes stashed.
+Server-side evidence: a `dev/session` request in the backend log carried
+`Origin/Host = code-evidence-tool.cluster-11.preview.emergentcf.cloud`, a DIFFERENT
+hostname than `REACT_APP_BACKEND_URL` (`code-evidence-tool.preview.emergentagent.com`)
+— a cross-origin/ingress hostname mismatch of this environment, which the exact-origin
+dev-session policy correctly refuses. **No Phase 1 code change was applied**: the
+origin rules, renderer isolation, IPC allow-list and auth were NOT weakened.
+**Blocker / UNVERIFIED:** the screenshot tool's browser sandbox is filesystem- and
+stdout-isolated, so the first failed/pending request classification could not be
+captured at the real-browser level; its console capture shows no app error (consistent
+with a pending cross-origin fetch). This real-browser preview boot check remains
+**unverified**; the jsdom connected test is NOT used as evidence that the real browser
+preview boots.
+
+Windows/GUI gates **G-1..G-4 remain open (not run)**. Modeled-Electron / jsdom /
+real-child-HTTP / controller substitutions are labeled and do not close them.
