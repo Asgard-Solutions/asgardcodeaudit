@@ -33,14 +33,12 @@ jobs:
           node --version
           python --version
           uv --version
-      - name: Verify backend lock or resolve first delivery
+      - name: Verify delivered backend lock
         working-directory: backend
-        shell: bash
-        run: |
-          if test -f uv.lock; then uv lock --check; else uv lock; fi
+        run: uv lock --check
       - name: Backend tests
         working-directory: backend
-        run: uv run --locked --group test python -m pytest tests/ --ignore=tests/test_external_preview.py
+        run: uv run --frozen --group test python -m pytest tests/ --ignore=tests/test_external_preview.py
       - name: Desktop dependencies
         working-directory: desktop
         run: npm ci
@@ -56,18 +54,34 @@ jobs:
       - name: Frontend tests
         working-directory: frontend
         run: npm test
-      - name: Preview transport regression tests
-        working-directory: frontend
-        run: node --test tests/preview-transport.node.cjs
       - name: Desktop renderer build
+        id: desktop-renderer
         working-directory: frontend
         env:
           VITE_ASGARD_MODE: desktop
         run: npm run build
+      - name: Preview renderer build
+        id: preview-renderer
+        if: runner.os == 'Windows'
+        working-directory: frontend
+        env:
+          VITE_ASGARD_MODE: preview
+          REACT_APP_BACKEND_URL: https://wrong-preview.invalid
+        run: npm run build -- --outDir dist-preview
       - name: Actual Windows Electron foundation
         if: runner.os == 'Windows'
         working-directory: desktop
-        run: node tests/run-native-smoke.cjs
+        run: npm run test:native
+      - name: Real Chromium preview and same-origin registration
+        if: always() && runner.os == 'Windows' && steps.preview-renderer.outcome == 'success'
+        working-directory: desktop
+        run: npm run test:preview-browser
+      - name: Desktop dependency advisory gate
+        working-directory: desktop
+        run: npm audit --audit-level=moderate
+      - name: Frontend dependency advisory gate
+        working-directory: frontend
+        run: npm audit --audit-level=moderate
       - name: Record dependency advisories
         if: always()
         shell: bash
@@ -88,40 +102,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: phase1-evidence-${{ matrix.os }}
-          path: test_reports/
+          path: |
+            test_reports/native-windows/
+            test_reports/preview-browser/
+            test_reports/dependencies/
+            test_reports/pytest/
           retention-days: 7
-  record-backend-lock:
-    needs: foundation
-    if: always() && github.ref == 'refs/heads/fix/phase1-completion-20260911'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: phase1-lock-windows-latest
-          path: generated
-      - uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const { owner, repo } = context.repo;
-            const branch = 'fix/phase1-completion-20260911';
-            const current = await github.rest.repos.getBranch({ owner, repo, branch });
-            if (current.data.commit.sha !== context.sha) {
-              core.notice('Repair branch advanced; do not overwrite newer work.');
-              return;
-            }
-            try {
-              await github.rest.repos.getContent({ owner, repo, path: 'backend/uv.lock', ref: branch });
-              core.notice('Backend lock already delivered.');
-              return;
-            } catch (error) {
-              if (error.status !== 404) throw error;
-            }
-            await github.rest.repos.createOrUpdateFileContents({
-              owner, repo, branch, path: 'backend/uv.lock',
-              message: 'build: deliver the solver-generated backend dependency lock',
-              content: fs.readFileSync('generated/uv.lock').toString('base64'),
-            });
