@@ -1,73 +1,45 @@
-# Asgard CodeAudit — Desktop (Electron) foundation
+# Desktop foundation
 
-Windows Electron shell that owns the local FastAPI backend and renders the
-shared React UI. The renderer is sandboxed and reaches the backend only through
-a narrow, allow-listed IPC bridge; the per-launch session secret never leaves
-the main process.
+Electron owns a local FastAPI backend and serves the React build through `app://asgard/`. The sandboxed preload exposes typed application operations. Session credentials remain outside the renderer.
 
-## Structure
-- `src/main.ts` — app lifecycle, single-instance lock (F09), `app://` protocol,
-  window creation, backend startup/failure/**retry without window/child
-  accumulation**/shutdown, IPC handlers with sender-frame + operation + body
-  validation.
-- `src/preload.ts` — secure `contextBridge` exposing only `handshake`,
-  `request`, `selectFolder`. Bundled (esbuild) so a sandboxed preload has no
-  local runtime `require`.
-- `src/ipc.ts` — pure **operation allow-list** (exact method+route+body) and
-  `isTrustedFrame` (unit-tested).
-- `src/protocol.ts` — `app://asgard/…` asset resolver (traversal-rejecting,
-  SPA-fallback) (unit-tested).
-- `src/backend-process.ts` — 127.0.0.1 ephemeral-port backend, per-launch secret
-  over the private stdin pipe, **validated + bounded** readiness (identity +
-  authenticated probe, per-request abort + overall deadline), idempotent stop.
-- `src/security.ts` — sandbox/contextIsolation/nodeIntegration=false, CSP,
-  navigation lockdown.
+## Windows development
 
-## Build artifacts
-`npm run build` runs esbuild (→ `dist/main.js`, `dist/preload.js`, self-contained
-CJS, `electron` external) then `tsc --noEmit` for type safety.
-
-## Local development — Windows (PowerShell)
+From the project root:
 
 ```powershell
-# 1) Build the renderer in DESKTOP mode (excludes the preview transport/session path)
-cd ..\frontend
-$env:VITE_ASGARD_MODE = "desktop"
-npm ci                     # uses package-lock.json
-npm run build              # outputs frontend\dist
+.\scripts\start-desktop.ps1
+```
 
-# 2) Backend interpreter (Python 3.13 with backend deps)
-cd ..\backend
-py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt      # runtime + test deps
-# (or: uv sync --locked   # uses backend\uv.lock)
+Prerequisites are Node.js 24 and uv. The script uses the delivered npm and uv lockfiles, Python 3.13, absolute interpreter paths, checked command exit codes, and restores its environment variables when it exits.
 
-# 3) Build + launch the desktop shell
-cd ..\desktop
-npm ci                     # downloads the Electron binary; uses package-lock.json
+## Tests
+
+From `desktop/` after dependency setup:
+
+```powershell
+npm test
 npm run build
-$env:ASGARD_PYTHON       = "..\backend\.venv\Scripts\python.exe"
-$env:ASGARD_BACKEND_DIR  = "..\backend"
-$env:ASGARD_RENDERER_DIST = "..\frontend\dist"
-npm start
+npm run test:native
 ```
 
-For a packaged run set `$env:ASGARD_BACKEND_EXE` to the PyInstaller sidecar
-instead of `ASGARD_PYTHON`. Packaging (PyInstaller + electron-builder/NSIS) is
-Phase 6 and is **not** part of this pass.
+`npm test` runs the existing Vitest suites and startup-order regressions. The native command requires Windows, a desktop session, the built desktop renderer, and `backend/.venv` with Python 3.13 dependencies. It starts the real Electron application, automates its own native folder dialog, exercises registration/restart/recovery, and checks the synthetic source hash. It is not an installer test.
 
-## Tests (Node 24)
+The preview browser test uses actual Chromium, the real backend, and a test-owned same-origin ingress:
+
 ```powershell
-npm test        # vitest: IPC allow-list, app:// resolver, backend lifecycle
+cd ..\frontend
+$env:VITE_ASGARD_MODE = 'preview'
+npm run build -- --outDir dist-preview
+cd ..\desktop
+npm run test:preview-browser
 ```
 
-## Lockfiles
-`desktop/package-lock.json`, `frontend/package-lock.json`, `backend/uv.lock`.
+This does not certify a specific hosted preview deployment. Keep its host routing/access controls separate from application verification.
 
-## Unverified until exercised on Windows (open gates)
-Native launch, native folder dialog, sandbox/CSP/IPC-sender enforcement in a
-real window, single-instance focus, PyInstaller sidecar, NSIS installer. These
-require Windows + the Electron binary and are **not** validated in the headless
-Linux preview. `npm test` exercises the pure logic and the backend lifecycle as
-real Node child processes, not a real Electron window.
+## Files
+
+`src/main.ts` connects the application window, protocol, lifecycle, and IPC handlers. `src/app-runtime.ts` supplies the production handler registration used by connected tests. `src/lifecycle.ts` owns startup, cancellation, cleanup, recovery, and state publication. `src/backend-process.ts` supplies the bounded authenticated process startup. `src/ipc.ts` validates operations and serializes results. `src/preload.ts` is bundled by `build.mjs` for the renderer sandbox.
+
+No generic shell, process-execution, or filesystem bridge is exposed. The source-auditing boundary remains read-only. A PyInstaller sidecar, installer, signing, provider credentials, and later scanning features are outside Phase 1.
+
+See [the verification record](../docs/PHASE1_COMPLETION.md) for the actual Windows and Linux results. Historical statements that all native execution was unverified are superseded only for the specific scenarios recorded there.
