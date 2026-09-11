@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dev": "node build.mjs && electron dist/main.js",
     "start": "electron dist/main.js",
-    "test": "vitest run"
+    "test": "vitest run && node --test tests/lifecycle-startup.test.cjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
