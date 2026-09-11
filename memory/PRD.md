@@ -81,3 +81,21 @@ NOT weakened. Windows gates G-1..G-4 still open.
 
 ## Phase 1 correction pass 2 (2026-06)
 Desktop foundation hardened: esbuild-bundled sandbox preload (no local require); custom `app://` protocol serving packaged assets (traversal-rejecting, SPA fallback), CSP scoped to app origin; backend readiness now validates schema identity + authenticated probe with per-request abort + overall deadline, handles spawn/early-exit/EPIPE/cancel, redacted bounded logs, idempotent stop, retry without window/child accumulation; IPC changed from path-prefix to explicit operation allow-list + body validation + exact main-frame/origin sender check; preview origin policy now same-origin + exact allow-list (no suffix wildcard/blanket localhost); invalid ASGARD_MODE raises (no silent preview). Desktop-mode build verified to exclude preview code (0 hits). Lockfiles: backend/uv.lock, frontend/package-lock.json, desktop/package-lock.json. Tests: backend 24 (3.11+3.13), desktop vitest 19, frontend vitest 6. Windows/Electron gates G-1..G-4 remain not-natively-run.
+
+## Phase 2 — Increment 1 of 4 (2026-09-11)
+Started Phase 2 (safe snapshot + real inventory) in bounded increments. **Increment 1
+delivered + tested (backend, Python 3.13); Phase 2 is NOT complete.**
+- Schema/migration `0003_phase2_inventory` (project_components, snapshots, snapshot_files,
+  audits, audit_events, audit_steps, inventory_facts) — upgrades Phase 1 DB without reseed.
+- `backend/app/inventory/{scope,capture,provenance}.py`: project-record-resolved roots,
+  pathspec exclusions + credential filter, realpath open-time boundary (symlink escape
+  refused), bounded capture into app-owned dir outside roots (per-file hash/size/encoding,
+  limits→Partial, post-copy re-hash→inconsistent/Partial, no target execution), optional
+  read-only git provenance (no fabricated revision on ordinary folders).
+- Added `pathspec>=1.1.1`; `backend/uv.lock` updated.
+- Evidence: backend pytest **30 passed** (24 Phase 1 + 6 new capture) on Py3.13.15; desktop
+  vitest **53 passed** (Node 24). D05/D06(linux)/D07/D08/D12 pass; D04 partial; D01/D02/D03/
+  D10/D11 not implemented; D09 native open. See IMPLEMENTATION_STATUS §"Phase 2".
+- Remaining: (2) parsers/indexing→inventory_facts, (3) persistent job queue/cancel/recovery,
+  (4) UI + `/api/v1` inventory/audits endpoints + desktop allow-list + close/reopen journey.
+Do NOT begin Phase 3.

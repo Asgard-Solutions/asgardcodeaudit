@@ -67,3 +67,77 @@ The complete pre-takeover status, including its Phase 0 and successive correctio
 https://github.com/Asgard-Solutions/asgardcodeaudit/blob/fb37575937cba8ec73c3bdcfc4de7bada5340a65/docs/IMPLEMENTATION_STATUS.md
 
 Its old dates, missing-delivery claims, and modeled-test claims are historical, not the current acceptance record. Existing decision logs are unchanged; the current completion record documents the tested dependency versions and scope.
+
+
+---
+
+## Phase 2 — safe snapshot + real inventory (IN PROGRESS, 2026-09-11)
+
+Phase 2 is built in the four bounded increments from the handoff. **This pass
+delivers Increment 1 only (schema + scope + bounded capture + provenance), fully
+tested on the backend. Increments 2–4 are NOT implemented yet, so the end-to-end
+inventory journey and several D-items are not yet demonstrable. Phase 2 is NOT
+complete.**
+
+### Increment 1 — delivered + verified (backend, Python 3.13)
+- **Schema/migration** `backend/migrations/versions/0003_phase2_inventory.py` +
+  ORM in `backend/app/storage/models.py`: `project_components`, `snapshots`,
+  `snapshot_files`, `audits`, `audit_events`, `audit_steps`, `inventory_facts`.
+  UUID-hex ids, UTC ISO timestamps, FKs, indexed relations, unique `(audit_id, seq)`.
+  Verified `alembic upgrade head` stacks on `0002` and preserves
+  `projects`/`project_settings`/`app_meta` (no reseed); `alembic_version=0003`.
+- **Scope** `backend/app/inventory/scope.py`: roots resolved from the project
+  record (never an arbitrary path), canonicalized via Phase 1 `pathcheck`; default
+  + credential + user exclusions via `pathspec` (`gitignore`); `within_root()`
+  re-checks realpath at open time (symlink/junction escape refused); unvalidated
+  associated roots dropped.
+- **Bounded capture** `backend/app/inventory/capture.py`: permitted text bytes
+  copied into an app-owned dir under `snapshots_dir` (outside every root) and those
+  bytes are recorded (not the live dir); per-file sha256/size/encoding/reason;
+  binary/oversized/excluded accounting; file-count + aggregate-byte + per-file
+  limits → **Partial**; post-copy re-hash → **inconsistent/Partial**; never copies
+  credential/excluded files; no target execution.
+- **Optional provenance** `backend/app/inventory/provenance.py`: read-only `git`
+  via absolute path + sanitized no-network/no-hook/no-pager env; ordinary folders
+  return None (no fabricated revision).
+- **Dependency:** added `pathspec>=1.1.1`; `backend/uv.lock` updated (34 pkgs),
+  recorded in `backend/pyproject.toml`.
+
+### Increment 1 evidence (executed 2026-09-11, Python 3.13.15 via uv `--frozen`)
+`env -u VIRTUAL_ENV uv run --frozen --group test --python 3.13 python -m pytest tests/ --ignore=tests/test_external_preview.py`
+→ **30 passed / 0 failed / 0 skipped** (24 Phase 1 regressions retained + 6 new
+`tests/test_snapshot_capture.py`). Desktop vitest baseline **53 passed** (Node 24.21.0).
+Backend healthy after restart (handshake 200).
+
+### D01–D12 status after Increment 1
+| ID | Status | Note |
+|---|---|---|
+| D01 Python/JS manifests+syntax | **Not implemented** | Increment 2 (parsers) |
+| D02 C#/PowerShell/WiX metadata | **Not implemented** | Increment 2 |
+| D03 unsupported-language inventory | **Not implemented** | Increment 2 |
+| D04 versioned vs ordinary provenance | **Partial** | ordinary-folder no-fabricated-revision tested; versioned real-metadata + native pending |
+| D05 source unchanged after audit | **Pass (Linux)** | `test_capture_hashes_and_source_unmutated_and_no_execution` |
+| D06 symlink/junction/traversal no escape | **Pass (Linux symlink)** | `test_symlink_escape_not_captured` + `within_root`; Windows junction pending |
+| D07 changing file → inconsistent/Partial | **Pass** | `test_changing_file_marks_inconsistent_partial` |
+| D08 excluded/unreadable/oversized/limit → Partial | **Pass** | `test_excluded_credentials_and_oversized`, `test_aggregate_limit_yields_partial` |
+| D09 space-path full journey (Windows) | **Open (native)** | needs Increments 2–4 + Windows |
+| D10 cancel/termination → Cancelled/Interrupted | **Not implemented** | Increment 3 |
+| D11 malformed JSON/YAML/XML bounded | **Not implemented** | Increment 2 (defusedxml/PyYAML) |
+| D12 target config not executed | **Pass** | tripwire `setup.py`/`postinstall` not run |
+
+### Remaining increments (not started)
+2. Deterministic indexing/parsers (stdlib `ast`, Tree-sitter JS/TS, `PyYAML`,
+   `defusedxml`) → persisted `inventory_facts` w/ per-file+hash evidence → D01,D02,D03,D11.
+3. Persistent job queue + progress/events + cancellation + interrupted recovery
+   (Queued→Snapshotting→Indexing→Completed/Partial/Cancelled/Failed/Interrupted) → D10.
+4. UI Inventory workflow + `/api/v1` endpoints (`/projects/{id}/inventory`,
+   `/audits`, `/audits/{id}`, `/audits/{id}/events`) + desktop allow-list ops +
+   close/reopen journey → D01–D12 completion incl. D09 native.
+
+### Reproducible validation (Increment 1)
+```
+cd /app/backend
+env -u VIRTUAL_ENV uv run --frozen --group test --python 3.13 python -m pytest tests/test_snapshot_capture.py -v
+# cleanup after any uv run (avoids uvicorn --reload storm):
+rm -rf /app/backend/.venv /app/backend/asgard_codeaudit_backend.egg-info && sudo supervisorctl restart backend
+```
