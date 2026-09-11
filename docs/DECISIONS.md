@@ -1,11 +1,54 @@
 # Asgard CodeAudit — Decisions (docs/DECISIONS.md)
 
-**Document type:** Phase 0 planning record. No application code, dependencies, credentials, or builds were produced.
-**Prepared:** June 2026 (Phase 0).
+**Document type:** Living decision record. **Phase 0 (planning) + Phase 1 (implementation) complete.**
+**Prepared:** June 2026 (Phase 0). **Updated:** June 2026 (Phase 1 implementation + correction pass).
 **Source of truth:** `01_PRODUCT_AND_TECHNICAL_SPEC.md` plus the user-approved decisions recorded here.
-**Scope of this iteration:** Phase 0 only — architecture, dependency/version assessment, interface definitions, environment limitations, contradictions, and the Phase 1 task plan. **No scaffolding, no features, no credentials, no paid API calls, no Phase 1.**
+**History note:** Sections 1–7 below are the original Phase 0 record (kept verbatim as history). The **Phase 1 addendum (section 8)** records what was actually built and supersedes any "no application source" phrasing above.
 
 ---
+
+## 8. Phase 1 addendum — implemented (June 2026)
+
+Phase 1 desktop foundation, SQLite persistence, and project registration are implemented. Actual source now exists at:
+`backend/app/**` (FastAPI app, `server.py` is a thin shim), `backend/migrations/**` (Alembic), `frontend/**` (Vite + React 19 + TS), `desktop/**` (Electron), plus tests. Preview and desktop share the same API schema, business logic, and SQLite schema behind transport adapters.
+
+### 8.1 Target toolchain result (item 1)
+- Target **Python 3.13** and **Node 24** are retained. The full backend test suite runs on a project-local **CPython 3.13.15** (installed via `uv`), and the frontend/desktop typecheck + build + vitest run on project-local **Node v24.21.0**.
+- **Concrete blocker (documented, not a silent downgrade):** the platform-managed *supervisor* that serves the preview cannot be modified (fixed command `uvicorn` under `/root/.venv` = Python 3.11.16, and `yarn start` = system Node 20.20.2). So the **running preview service** executes on 3.11/Node 20, while **target-runtime validation** (tests/build) is performed separately on 3.13/Node 24. This split is explicit; 3.13/Node 24 results are real, not simulated on another runtime.
+
+### 8.2 Origin / session boundary (item 4)
+- Preview `POST /api/v1/dev/session` issues a token only for a **same-origin** request, an explicit allow-list entry, `localhost`, or the platform domain suffix `preview.emergentagent.com`. Genuinely foreign origins get **403**. CORS uses a matching `allow_origin_regex` (not `*`). The Cloudflare/ingress rewrites the exact Origin string, so a hostname-suffix + same-origin rule (not a hardcoded string) is used. Verified live: matching origin → 200, `evil.example` → 403.
+- Desktop mode exposes **no** `dev/session` (404) and uses IPC only.
+
+### 8.3 Explicit mode separation (item 4)
+- `frontend/src/transport/index.ts` selects mode from build-time `VITE_ASGARD_MODE` and **dynamically imports** exactly one adapter (preview code is excluded from a desktop build). A desktop build with no `window.asgard` bridge raises a **useful startup error** — never a silent fall back to preview. An invalid mode value is rejected (`ConfigError`).
+
+### 8.4 Validation invariants (item 5)
+- **Active-root uniqueness:** at most one `status='active'` registration per canonical root, enforced by a **partial unique index** (`uq_projects_active_root`, migration `0002`) plus service checks on create **and** reactivation (`IntegrityError` → 409). Migration `0002` defensively archives any pre-existing duplicates (rows preserved, not discarded).
+- **Name normalization:** names are whitespace-collapsed and a blank normalized name is rejected (**422**) on both create and update.
+
+### 8.5 Dependencies (item 3)
+- `backend/requirements.txt` now declares only actual Phase 1 deps (FastAPI, uvicorn, starlette, pydantic, pydantic-settings, SQLAlchemy, Alembic, platformdirs, python-dotenv + test deps). Template Mongo/integration packages removed. Lockfiles: `backend/uv.lock` (33 pkgs, resolved on 3.13) and `frontend/package-lock.json`. SQLite only, both environments. No later-phase scanners/providers added.
+
+### 8.6 Nine-tension classification (Phase 0 §4 revisited)
+"Preserve" = keeps the approved spec; "Change" = deviates (only where the user explicitly directed).
+
+| ID | Proposed resolution | Affected requirement | Preserve / Change |
+|---|---|---|---|
+| C-1 | Desktop IPC↔loopback vs preview same-origin behind one transport contract | Spec §3 transport/security | **Preserve** — spec anticipates a preview dev adapter |
+| C-2 | Mount business API under `/api/v1` in both envs; ingress handled in adapter | Spec §11 endpoints | **Preserve** — user directed "keep contract under /api/v1 in both environments" |
+| C-3 | Target **Python 3.13**; validate on 3.13 (uv), preview service runs 3.11 with documented blocker | Deps §2 runtime | **Change→reverted to spec.** User overrode the Phase-0 "pin later" idea; 3.13 is validated now |
+| C-4 | Target **Node 24**; validate on Node 24, preview service runs Node 20 with documented blocker | Deps §2 runtime | **Change→reverted to spec.** Same as C-3 |
+| C-5 | Rollback-journal (DELETE) in Phase 1; WAL deferred until packaged SQLite validated | Spec §12 storage | **Preserve** — user confirmed; evidence: preview SQLite 3.40.1 vs target 3.53.1 |
+| C-6 | No OS credential store in preview → session-only/unavailable, no plaintext; session auth never weakened | Spec §9,§13 | **Preserve** — intended design; persistence is an open gate |
+| C-7 | PyInstaller Windows x64 sidecar only on Windows (preview is Linux aarch64) | Deps §2 packaging | **Preserve** — open gate G-4 |
+| C-8 | NSIS installer behavior treated as Phase 6 validation item | Spec §16 | **Preserve** — open gate G-6 |
+| C-9 | Read-only import ≠ execution; safe-parse with provenance | Spec §2,§10 | **Preserve** — Phase 5 scope |
+
+No tension changed the architecture or the SQLite/desktop decisions. C-3/C-4 moved *toward* stricter spec adherence at the user's explicit direction.
+
+---
+
 
 ## 1. User-approved decisions (this session)
 

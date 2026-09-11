@@ -69,11 +69,13 @@ def create_app() -> FastAPI:
     )
 
     # Preview harness calls the backend through the platform ingress. Desktop
-    # uses loopback IPC (no browser CORS). Permissive only helps the preview.
+    # uses loopback IPC (no browser CORS). In preview we restrict CORS to the
+    # explicit allow-list; an empty list means only same-origin is served.
     if settings.is_preview:
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
+            allow_origins=settings.preview_origins,
+            allow_origin_regex=settings.cors_origin_regex(),
             allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],

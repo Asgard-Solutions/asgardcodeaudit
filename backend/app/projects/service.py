@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import Settings
@@ -64,14 +65,18 @@ def _resolve_source(payload: ProjectCreate, settings: Settings) -> tuple[Path, s
     return real, payload.path, "local", None
 
 
+def _assert_no_active_duplicate(db: Session, root_path: str, exclude_id: str | None = None) -> None:
+    stmt = select(Project).where(Project.root_path == root_path, Project.status == "active")
+    if exclude_id is not None:
+        stmt = stmt.where(Project.id != exclude_id)
+    if db.execute(stmt).scalar_one_or_none() is not None:
+        raise ServiceError(409, "duplicate_root", "This folder is already registered and active.")
+
+
 def register_project(db: Session, payload: ProjectCreate, settings: Settings) -> Project:
     real, original, source_type, fixture_id = _resolve_source(payload, settings)
 
-    existing = db.execute(
-        select(Project).where(Project.root_path == str(real), Project.status == "active")
-    ).scalar_one_or_none()
-    if existing is not None:
-        raise ServiceError(409, "duplicate_root", "This folder is already registered.")
+    _assert_no_active_duplicate(db, str(real))
 
     project = Project(
         name=payload.name.strip(),
@@ -86,7 +91,11 @@ def register_project(db: Session, payload: ProjectCreate, settings: Settings) ->
     )
     project.settings = ProjectSettings(exclusions=json.dumps(DEFAULT_EXCLUSIONS))
     db.add(project)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ServiceError(409, "duplicate_root", "This folder is already registered and active.") from exc
     db.refresh(project)
     return project
 
@@ -117,8 +126,15 @@ def update_project(db: Session, project_id: str, payload: ProjectUpdate) -> Proj
     if payload.source_sharing_policy is not None:
         p.source_sharing_policy = payload.source_sharing_policy
     if payload.status is not None:
+        # Reactivating must not create a second active owner of the same root.
+        if payload.status == "active" and p.status != "active":
+            _assert_no_active_duplicate(db, p.root_path, exclude_id=p.id)
         p.status = payload.status
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ServiceError(409, "duplicate_root", "This folder is already registered and active.") from exc
     db.refresh(p)
     return p
 

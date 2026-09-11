@@ -18,9 +18,10 @@ def make_client(tmp_path, monkeypatch):
 
     created = []
 
-    def _make(mode: str = "preview", data_dir=None):
+    def _make(mode: str = "preview", data_dir=None, origins=None):
         monkeypatch.setenv("ASGARD_MODE", mode)
         monkeypatch.setenv("ASGARD_DATA_DIR", str(data_dir or tmp_path))
+        monkeypatch.setenv("ASGARD_PREVIEW_ORIGINS", ",".join(origins or []))
         cfg.get_settings.cache_clear()
         dbmod._engine = None
         dbmod._SessionLocal = None

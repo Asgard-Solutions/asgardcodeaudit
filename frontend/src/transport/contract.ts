@@ -79,6 +79,7 @@ export interface Transport {
   readonly mode: Mode;
   init(): Promise<void>;
   request<T>(method: string, path: string, body?: unknown): Promise<T>;
+  selectFolder?(): Promise<string | null>;
 }
 
 export class ApiError extends Error {

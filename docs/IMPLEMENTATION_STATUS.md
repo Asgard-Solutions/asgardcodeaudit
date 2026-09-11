@@ -1,8 +1,8 @@
 # Asgard CodeAudit — Implementation Status (docs/IMPLEMENTATION_STATUS.md)
 
-**Prepared:** June 2026.
-**Current state:** **Phase 0 complete (planning only).** No application source, dependencies, credentials, or builds exist yet. Nothing has been scaffolded.
-**Next action:** await user approval of this plan, then send the Phase 1 prompt from `04_PHASE_PROMPTS.md`.
+**Prepared:** June 2026 (Phase 0). **Updated:** June 2026 (Phase 1 implementation + correction pass).
+**Current state:** **Phase 1 implemented** (desktop foundation, SQLite persistence, project registration). Phase 2+ not started.
+**Stop point:** Phase 1 report delivered; awaiting review before Phase 2.
 
 ---
 
@@ -10,112 +10,58 @@
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | Architecture, dependency/version assessment, interface definitions, environment limits, contradictions, Phase 1 task plan | **Done** (this document + `docs/DECISIONS.md`) |
-| 1 | Desktop foundation, SQLite, project registration | Planned (tasks below) — **not started** |
-| 2 | Safe snapshot + real inventory | Planned |
-| 3 | Rules, evidence, findings | Planned |
-| 4 | OpenAI + LM Studio providers | Planned |
-| 5 | Prompt Studio, comparison, evidence exchange | Planned |
-| 6 | Recovery, installer, release validation | Planned |
+| 0 | Architecture, dependency/version assessment, interfaces, env limits, contradictions, Phase 1 plan | Done |
+| 1 | Desktop foundation, SQLite + Alembic, project registration | **Implemented** |
+| 2–6 | Snapshot/inventory, rules/findings, providers, prompt studio, installer/release | Not started |
 
-**Read-only invariant (all phases):** the app writes only its own DB/snapshots/reports/exports; it never mutates, executes, installs, commits, pushes, or deploys audited repositories.
+**Read-only invariant (all phases):** the app writes only its own DB/snapshots/reports/exports; it never mutates, executes, installs, commits, pushes, or deploys audited source.
 
 ---
 
-## 2. Proposed repository layout (target)
+## 2. What was built (files)
 
-```
-asgard-codeaudit/
-  README.md
-  package.json                # npm workspaces root
-  package-lock.json
-  .github/workflows/ci.yml
-  .github/workflows/windows-release.yml
-  apps/
-    desktop/   src/{main.ts,preload.ts,ipc.ts,backend-process.ts,security.ts}  electron-builder.yml
-    web/       src/{app,features/*,transport/{desktop.ts,preview.ts},components}
-    backend/   pyproject.toml  uv.lock  app/{main,api,storage,projects,snapshots,indexing,rules,evidence,providers,prompts,reports,jobs,security,diagnostics}  migrations/  tests/
-  packages/contracts/          # shared typed transport contract (FE/BE/desktop)
-  rule-packs/                  # data-only versioned rules
-  prompt-templates/            # versioned templates
-  fixtures/repositories/       # labeled synthetic audit fixtures
-  scripts/{build-windows.ps1,smoke-installed.ps1}
-  tests/e2e/
-  docs/{DECISIONS.md,DEPENDENCIES.md,IMPLEMENTATION_STATUS.md,BUILD_AND_RELEASE.md,SECURITY_AND_PRIVACY.md}
-  docs/superpowers/{specs,plans}/
-```
+**Backend** (`backend/`): `server.py` (shim → `app.main`), `app/main.py` (lifespan: desktop stdin secret, single-instance lock, Alembic upgrade — no reseed), `app/config.py` (mode + app-data + origin policy), `app/build_info.py`, `app/security/{__init__,auth}.py` (per-launch secret, constant-time compare, dev token, origin rule), `app/storage/{db,models,lock}.py` (SQLite pragmas: journal=DELETE, FK on, busy_timeout, synchronous=FULL; single-instance flock), `app/projects/{pathcheck,fixtures,service,schemas}.py`, `app/api/{diagnostics,projects,dev}.py`, `migrations/**` (`0001_initial`, `0002_active_root_unique`), `pyproject.toml`, `uv.lock`, `requirements.txt`, `tests/**`.
 
-Emergent may propose a small structural change in Phase 0 but must not silently switch architecture or database. **No change proposed** — the layout is adopted as-is. In the preview environment this maps under the platform root; the CRA scaffold is replaced in Phase 1 (PA-5).
+**Frontend** (`frontend/`): Vite + React 19 + TS. `src/transport/{contract,preview,desktop,index}.ts` (explicit mode, dynamic import), `src/api/{client,hooks}.ts`, `src/components/{Layout,Modal,ui}.tsx`, `src/features/{overview,projects,diagnostics}/**`, `src/App.tsx` (boot: create transport → session → handshake; error+retry), Tailwind config, `vitest.config.ts`, tests, `package-lock.json`.
+
+**Desktop** (`desktop/`): `src/main.ts` (single-instance, window, backend lifecycle, IPC handlers with sender+argument validation), `src/preload.ts` (narrow contextBridge), `src/ipc.ts` (allow-list, unit-tested), `src/backend-process.ts` (127.0.0.1 ephemeral port, stdin secret, readiness poll), `src/security.ts` (sandbox/CSP/navigation), `README.md` (dev commands), `tsconfig.json`, `package.json`, `src/ipc.test.ts`.
+
+Deliverable-repo mapping (preview flattens `apps/backend`→`backend`, `apps/web`→`frontend`, `apps/desktop`→`desktop` to satisfy the fixed platform supervisor).
 
 ---
 
-## 3. Interface definitions (target contracts)
+## 3. F01–F09 implementation / verification matrix
 
-### 3.1 Backend API (versioned, mounted under `/api` for preview parity — see DECISIONS PA-1/C-2)
-| Family | Responsibility (Phase) |
+Verification environment key: **PY** = pytest on Python 3.11 (preview) **and** 3.13 (target); **UI** = live preview (Linux, labeled preview); **VT** = vitest; **WIN** = requires Windows/GUI + Electron binary (open gate, unverified here).
+
+| ID | Requirement | Implemented | Verified (env) | Notes / remaining |
+|---|---|---|---|---|
+| F01 | Native launch + backend readiness/build identity | Yes | Backend readiness **PY/UI**; native launch **WIN (unverified)** | `startup/handshake` + boot screen verified in preview; Electron launch is G-1/G-2 |
+| F02 | Startup failure → useful error + retry + diagnostics | Yes | Preview boot-error+retry **UI**; desktop dialog+retry **WIN (unverified)** | `main.ts` shows retry/quit dialog and respawns |
+| F03 | Native selection + validated registration | Yes | Path validation + dedupe + overlap **PY**; register flow **UI**; native dialog **WIN (unverified)** | `dialog.showOpenDialog` wired via IPC; preview uses fixtures |
+| F04 | Restart preserves projects/settings, no reseed | Yes | **PY** (`test_persistence_across_restart`) + **UI** | Alembic upgrade only; no seed on startup |
+| F05 | Removal leaves source untouched | Yes | **PY** (`test_remove_registration_leaves_source_untouched`) + **UI** | DELETE removes row only |
+| F06 | Missing/wrong API auth **and** invalid IPC senders rejected | Yes | API 401 **PY/UI**; origin 403 **PY/live curl**; IPC allow-list/validation **VT**; sender-frame check **WIN (unverified)** | `assertTrustedSender` runs only in a real Electron window |
+| F07 | App-data / source-root separation | Yes | **PY** (`overlaps_app_data` both directions) | platformdirs app-data outside roots |
+| F08 | Preview clearly labeled + desktop separation enforced | Yes | **PY/UI** (banner, fixture-only, dev/session 404 in desktop, mode select **VT**) | preview transport excluded from desktop build |
+| F09 | One owner of the app-data directory | Yes | Backend flock **PY** (`test_single_instance`); Electron single-instance **WIN (unverified)** | both layers implemented |
+
+**Explicitly unverified (open gates), each with what it needs:**
+| Gate | Needs |
 |---|---|
-| `/api/health`, `/api/build`, `/api/diagnostics` | Readiness, schema/build identity, redacted dependency/process status (1) |
-| `/api/v1/projects`, `/projects/{id}` | Register/update/archive approved roots + metadata; no source deletion (1) |
-| `/api/v1/projects/{id}/constraints` | User-approved architecture/business constraints w/ revisions (1–2) |
-| `/api/v1/projects/{id}/inventory` | Evidence-backed component/file inventory (2) |
-| `/api/v1/audits`, `/audits/{id}`, `/events`, `/coverage`, `/compare` | Preflight/create/progress/state/cancel/resume; events cursor; coverage; baseline compare (2–5) |
-| `/api/v1/findings`, `/findings/{id}` | Read/filter findings, reviewed dispositions (3) |
-| `/api/v1/evidence/{id}` | Bounded redacted evidence excerpt + provenance (not arbitrary paths) (3) |
-| `/api/v1/rules`, `/rule-packs` | Versioned rule metadata, data-only imports, overrides (3) |
-| `/api/v1/providers`, `/providers/{id}/test` | Nonsecret config, credential replacement, model/capability tests (4) |
-| `/api/v1/prompts`, `/exports` | Versioned prompt generation, approved outputs (5) |
-| `/api/v1/evidence-imports` | Size-limited supported report imports w/ provenance (5) |
-| `/api/v1/backups`, `/restore` | App-data backup + explicit restore (6) |
+| G-1 | Windows/GUI + Electron: renderer sandbox/contextIsolation/CSP + IPC sender-frame enforcement in a real window |
+| G-2 | Windows/GUI + Electron: loopback bind, stdin-secret handshake in-process, single-instance focus behavior |
+| G-3 | Windows: native `dialog.showOpenDialog` folder selection + cancellation |
+| G-4 | Windows x64 build host: PyInstaller backend sidecar |
+| G-5 | Windows: Credential Manager persistence (not in Phase 1 scope) |
+| G-6 | Windows: electron-builder NSIS install/upgrade/uninstall (Phase 6) |
+| G-7 | Windows x64 CI/build host (preview is Linux aarch64) |
+| G-8/G-9 | Live LM Studio LAN / live OpenAI (Phase 4) |
+| G-10/G-11 | Code signing / measured performance |
 
-OpenAPI and frontend types generated from the same schemas (`openapi-typescript`). All production endpoints require session auth except the narrow startup handshake. **No general run-command endpoint ever.**
-
-### 3.2 Desktop interface (Electron)
-- `main.ts`: owns backend child process lifecycle; validates every IPC sender/argument; retains the authenticated loopback transport.
-- `preload.ts`: exposes a narrow, typed, allowlisted API only — no arbitrary HTTP, FS, or shell.
-- `backend-process.ts`: spawns the FastAPI sidecar bound to `127.0.0.1:<ephemeral>`, passes a per-launch secret via a private pipe (never argv/URL/log/config), waits for readiness + build identity before enabling scans.
-- `security.ts`: enforces `sandbox`, `contextIsolation`, CSP, navigation/window restrictions, single-instance app-data lock.
-
-### 3.3 Transport contract (`packages/contracts/`)
-One typed request/response contract implemented by `transport/desktop.ts` (IPC→loopback) and `transport/preview.ts` (same-origin `${REACT_APP_BACKEND_URL}/api/...`). Preview adapter excluded from desktop builds.
+A mocked platform op or preview screenshot never closes a WIN gate.
 
 ---
 
-## 4. Phase 1 — independently testable tasks (proposed, NOT started)
-
-**User outcomes (only these):**
-1. Launch the desktop app and see backend readiness or a useful startup error.
-2. Register a local source folder via a native directory picker.
-3. Restart and find saved projects in local SQLite.
-
-| Task | Exact files | Tests | Verifiable in preview? |
-|---|---|---|---|
-| T1 Backend app + health/build/diagnostics | `apps/backend/app/main.py`, `app/api/diagnostics.py`, `app/diagnostics/` | `tests/test_health_build.py` | Yes |
-| T2 SQLite storage + Alembic baseline (projects, project_settings) | `app/storage/`, `apps/backend/migrations/` | `tests/test_migrations.py` (up/down, FK on) | Yes |
-| T3 Project registration + canonical path validation | `app/projects/`, `app/api/projects.py` | `tests/test_projects.py` (register/list/archive, persistence), path rejection cases | Yes (logic); native picker = **G-3** |
-| T4 App-data separation invariant | `app/storage/paths.py` (platformdirs) | part of `test_projects.py` (reject root nested in/around app-data) | Yes |
-| T5 Local API session auth + startup handshake | `app/security/auth.py`, wired in `main.py` | `tests/test_local_api_auth.py` (missing/wrong token rejected) | Partial — token logic yes; IPC sender validation = **G-1** |
-| T6 Electron shell + secure boundary | `apps/desktop/src/{main.ts,preload.ts,ipc.ts,backend-process.ts,security.ts}`, `electron-builder.yml` | `npm run test:desktop` (Playwright-Electron) | **No — G-1/G-2/G-3** |
-| T7 Transport contract + adapters | `packages/contracts/`, `apps/web/src/transport/{desktop,preview}.ts` | contract unit tests (vitest) | Yes (preview path); desktop path = G-1 |
-| T8 React shell + screens (Overview, Projects, Project Settings, Diagnostics) with real empty/loading/error states | `apps/web/src/app/`, `src/features/projects/`, `src/components/` | `tests/e2e/projects.spec.ts` (register→persist→reopen) | Yes (against preview transport) |
-| T9 Preview fixture selector, explicitly labeled | `apps/web/src/features/projects/PreviewFixtureNotice.tsx`, `apps/backend/app/projects/fixtures.py` | e2e asserts the "preview fixture — not your machine" label | Yes |
-
-**Phase 1 acceptance mapping** (`05_ACCEPTANCE_TESTS_AND_TRACEABILITY.md`): F01 (native launch) → **G-1/G-2 open**; F02 (startup failure UX) → preview-simulable + desktop gate; F03 (register folder) → logic in preview, native picker **G-3**; F04 (restart persists, no duplicate seeding) → preview Yes; F05 (remove registration, source untouched) → preview Yes; F06 (unauthorized API/IPC rejected) → API in preview, IPC **G-1**; F07 (app-data separation) → preview Yes; F08 (preview vs desktop labeling) → preview Yes; F09 (single app-data owner) → **G-2 open**.
-
-**Explicitly out of Phase 1:** scanning, inventory, rules, findings, providers/LLM, prompts, exports, backup/restore, installer. No login, billing, cloud DB, or repository execution.
-
----
-
-## 5. Verification gates carried forward
-
-Open gates G-1…G-11 are defined in `docs/DECISIONS.md §6`. They remain **Not verified** and must be reported as such in every phase report. A preview run, screenshot, or mock never closes a Windows/LAN/live-provider/signing gate. Windows build scripts (`scripts/build-windows.ps1`, `scripts/smoke-installed.ps1`) and reproducible validation steps are delivered in Phase 6.
-
----
-
-## 6. What was explicitly NOT done in Phase 0
-- No app scaffold, no code in `apps/`, no `package.json`/`pyproject.toml`, no migrations.
-- No dependency installation; no locked/transitive manifest, license set, or SBOM produced.
-- No credentials provisioned; no OpenAI/LM Studio calls (mock or live).
-- No Windows build, installer, or LAN connection attempt.
-- No changes to any audited repository.
-
-**Stop point:** Phase 0 planning delivered. Awaiting approval before Phase 1.
+## 4. Out of scope for Phase 1 (not added)
+Scanning, inventory, rules, findings, prompt generation, LLM/provider calls, provider credentials, automatic repairs, backup/restore, publishing, production installer. None present.

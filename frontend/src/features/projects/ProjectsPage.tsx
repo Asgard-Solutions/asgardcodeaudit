@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { toast } from "sonner";
 import { Plus, FolderGit2, Trash2, Settings2, HardDriveDownload, Info } from "lucide-react";
 import type { Mode } from "@/transport/contract";
+import { api } from "@/api/client";
 import { useProjects, useFixtures, useCreateProject, useRemoveProject } from "@/api/hooks";
 import { Card, Button, Badge, Spinner, EmptyState, Input } from "@/components/ui";
 import Modal from "@/components/Modal";
@@ -11,17 +13,34 @@ function RegisterForm({ mode, onDone }: { mode: Mode; onDone: () => void }) {
   const create = useCreateProject();
   const [name, setName] = useState("");
   const [fixtureId, setFixtureId] = useState<string>("");
+  const [pickedPath, setPickedPath] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
 
-  const canSubmit = name.trim().length > 0 && (mode === "preview" ? !!fixtureId : true);
+  const canSubmit =
+    name.trim().length > 0 && (mode === "preview" ? !!fixtureId : !!pickedPath);
+
+  const choose = async () => {
+    setPicking(true);
+    try {
+      const path = await api.pickFolder();
+      if (path) setPickedPath(path); // null => user cancelled; keep prior state
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not open the folder picker.");
+    } finally {
+      setPicking(false);
+    }
+  };
 
   const submit = async () => {
     try {
       await create.mutateAsync(
-        mode === "preview" ? { name: name.trim(), fixture_id: fixtureId } : { name: name.trim() }
+        mode === "preview"
+          ? { name: name.trim(), fixture_id: fixtureId }
+          : { name: name.trim(), path: pickedPath as string }
       );
       onDone();
     } catch {
-      /* toast handled in hook */
+      /* toast handled in hook (duplicate root, app-data overlap, invalid path…) */
     }
   };
 
@@ -30,8 +49,8 @@ function RegisterForm({ mode, onDone }: { mode: Mode; onDone: () => void }) {
       <div className="rounded-lg border border-signal/20 bg-signal/[0.06] p-3 text-xs text-signal-soft">
         <Info className="mr-1.5 inline h-3.5 w-3.5" />
         {mode === "preview"
-          ? "Preview mode registers a labeled synthetic fixture that the backend actually reads. The native Windows folder picker is a desktop feature."
-          : "The native OS folder picker opens in the desktop build."}
+          ? "Preview mode registers a labeled synthetic fixture that the backend actually reads. The native Windows folder picker is a desktop feature and is not exercised here."
+          : "Choose a local source folder with the native OS picker. Asgard records the folder read-only and never modifies it."}
       </div>
 
       <div>
@@ -47,7 +66,7 @@ function RegisterForm({ mode, onDone }: { mode: Mode; onDone: () => void }) {
         />
       </div>
 
-      {mode === "preview" && (
+      {mode === "preview" ? (
         <div>
           <label className="mb-1.5 block text-xs uppercase tracking-wider text-ink-faint">
             Synthetic fixture
@@ -72,6 +91,20 @@ function RegisterForm({ mode, onDone }: { mode: Mode; onDone: () => void }) {
                 <div className="mt-1 truncate font-mono text-[11px] text-ink-faint">{f.path}</div>
               </button>
             ))}
+          </div>
+        </div>
+      ) : (
+        <div>
+          <label className="mb-1.5 block text-xs uppercase tracking-wider text-ink-faint">
+            Source folder
+          </label>
+          <div className="flex items-center gap-3">
+            <Button variant="outline" onClick={choose} loading={picking} data-testid="pick-folder-btn">
+              <FolderGit2 className="h-4 w-4" /> Choose folder…
+            </Button>
+            <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink-faint" data-testid="picked-path">
+              {pickedPath ?? "No folder selected"}
+            </span>
           </div>
         </div>
       )}

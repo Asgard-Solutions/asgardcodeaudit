@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import ForeignKey, Index, String, Text
+from sqlalchemy import ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -38,8 +38,17 @@ class Project(Base):
         back_populates="project", cascade="all, delete-orphan", uselist=False
     )
 
-    __table_args__ = (Index("ix_projects_root_path", "root_path"),
-                      Index("ix_projects_status", "status"))
+    __table_args__ = (
+        Index("ix_projects_root_path", "root_path"),
+        Index("ix_projects_status", "status"),
+        # At most one ACTIVE registration per canonical root (enforced in DB).
+        Index(
+            "uq_projects_active_root",
+            "root_path",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
 
 
 class ProjectSettings(Base):

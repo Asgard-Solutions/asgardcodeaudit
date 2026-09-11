@@ -3,9 +3,18 @@ from __future__ import annotations
 import json
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .fixtures import list_fixtures
+
+
+def _normalize_name(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return None
+    normalized = " ".join(str(v).split())  # collapse/trim whitespace
+    if not normalized:
+        raise ValueError("Project name must not be blank.")
+    return normalized
 
 
 class ProjectCreate(BaseModel):
@@ -18,13 +27,23 @@ class ProjectCreate(BaseModel):
     profile: str = "standard-static"
     source_sharing_policy: Literal["offline", "lan-only", "online"] = "offline"
 
+    @field_validator("name")
+    @classmethod
+    def _norm(cls, v: str) -> str:
+        return _normalize_name(v)  # type: ignore[return-value]
+
 
 class ProjectUpdate(BaseModel):
-    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    name: Optional[str] = Field(default=None, max_length=200)
     tags: Optional[list[str]] = None
     profile: Optional[str] = None
     source_sharing_policy: Optional[Literal["offline", "lan-only", "online"]] = None
     status: Optional[Literal["active", "archived"]] = None
+
+    @field_validator("name")
+    @classmethod
+    def _norm(cls, v: Optional[str]) -> Optional[str]:
+        return _normalize_name(v)
 
 
 class ProjectOut(BaseModel):

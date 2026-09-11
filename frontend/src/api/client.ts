@@ -1,4 +1,5 @@
 import { getTransport } from "@/transport";
+import { ApiError } from "@/transport/contract";
 import type {
   Handshake,
   BuildIdentity,
@@ -13,6 +14,13 @@ const t = () => getTransport();
 export const api = {
   mode: () => t().mode,
   initSession: () => t().init(),
+  pickFolder: async (): Promise<string | null> => {
+    const transport = t();
+    if (transport.mode !== "desktop" || !transport.selectFolder) {
+      throw new ApiError(0, "The native folder picker is only available in the desktop app.");
+    }
+    return transport.selectFolder();
+  },
   handshake: () => t().request<Handshake>("GET", "/api/v1/startup/handshake"),
   build: () => t().request<BuildIdentity>("GET", "/api/v1/build"),
   diagnostics: () => t().request<Diagnostics>("GET", "/api/v1/diagnostics"),

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import { ShieldAlert, ShieldCheck, Loader2 } from "lucide-react";
 import { api } from "@/api/client";
+import { createTransport } from "@/transport";
 import type { Handshake } from "@/transport/contract";
 import Layout from "@/components/Layout";
 import { Button } from "@/components/ui";
@@ -21,6 +22,7 @@ export default function App() {
   const start = useCallback(async () => {
     setBoot({ status: "loading" });
     try {
+      await createTransport();
       await api.initSession();
       const identity = await api.handshake();
       setBoot({ status: "ready", identity });
