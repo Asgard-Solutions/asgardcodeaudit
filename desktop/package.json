@@ -13,9 +13,9 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "esbuild": "^0.24.0",
-    "electron": "^33.2.1",
+    "electron": "44.3.0",
+    "esbuild": "0.28.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "4.1.11"
   }
 }
