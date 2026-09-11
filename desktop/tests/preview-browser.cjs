@@ -24,6 +24,10 @@ async function finish(error) {
   clearTimeout(deadline);
   try {
     if (win && !win.isDestroyed()) {
+      await Promise.race([
+        win.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))'),
+        delay(500),
+      ]);
       fs.writeFileSync(path.join(output, 'preview.png'), (await win.capturePage()).toPNG());
       logs.push(await win.webContents.executeJavaScript('document.body.innerText').catch(() => ''));
     }
@@ -88,7 +92,7 @@ app.whenReady().then(async () => {
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  win = new BrowserWindow({ show: false, width: 1200, height: 800, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  win = new BrowserWindow({ show: true, width: 1200, height: 800, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
   win.webContents.on('console-message', (_event, level, message) => logs.push({ level, message }));
   await win.loadURL(origin);
   const js = code => win.webContents.executeJavaScript(code, true);
