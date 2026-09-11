@@ -1,13 +1,9 @@
 import type { Mode, Transport } from "./contract";
 import { ApiError } from "./contract";
 
-// Explicit, build-time mode selection. The desktop build is compiled with
-// VITE_ASGARD_MODE=desktop; the preview harness defaults to "preview". There is
-// NO silent fallback: a desktop build without the preload bridge produces a
-// useful startup error, and an invalid mode value is rejected outright. Each
-// adapter is loaded via dynamic import so the unused transport is excluded from
-// the production bundle for the selected mode.
-
+// The branch expression must reference the build-time value directly. Returning
+// the mode through a helper can leave both dynamic imports in emitted output.
+// npm's postbuild gate checks the actual desktop files, not just this source.
 export class ConfigError extends Error {}
 
 let _transport: Transport | null = null;
@@ -27,8 +23,8 @@ function hasDesktopBridge(): boolean {
 }
 
 export async function createTransport(): Promise<Transport> {
-  const mode = resolveMode();
-  if (mode === "desktop") {
+  resolveMode(); // Invalid configuration must still fail instead of falling back.
+  if (import.meta.env.VITE_ASGARD_MODE === "desktop") {
     if (!hasDesktopBridge()) {
       throw new ApiError(
         0,
