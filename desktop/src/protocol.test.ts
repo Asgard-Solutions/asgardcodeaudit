@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import path from "node:path";
 import { resolveAssetPath, mimeFor, isApprovedAuthority, APP_LAUNCH_URL, APP_ORIGIN } from "./protocol";
 
-const dist = "/app/frontend/dist";
+// A Windows rooted path without a drive is not fully absolute. Match the
+// resolver's documented absolute-output contract using a platform-correct root.
+const dist = path.resolve("renderer-fixture", "dist");
 
 describe("app:// asset resolver", () => {
   it("serves index.html for root and SPA routes", () => {

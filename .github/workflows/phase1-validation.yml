@@ -1,0 +1,109 @@
+name: Phase 1 validation
+on:
+  push:
+    branches: [main, fix/phase1-completion-20260911]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: phase1-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  foundation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v6
+      - name: Runtime versions
+        run: |
+          node --version
+          python --version
+          uv --version
+      - name: Verify delivered backend lock
+        working-directory: backend
+        run: uv lock --check
+      - name: Backend tests
+        working-directory: backend
+        run: uv run --frozen --group test python -m pytest tests/ --ignore=tests/test_external_preview.py
+      - name: Desktop dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Desktop tests
+        working-directory: desktop
+        run: npm test
+      - name: Desktop build
+        working-directory: desktop
+        run: npm run build
+      - name: Frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend tests
+        working-directory: frontend
+        run: npm test
+      - name: Desktop renderer build
+        id: desktop-renderer
+        working-directory: frontend
+        env:
+          VITE_ASGARD_MODE: desktop
+        run: npm run build
+      - name: Preview renderer build
+        id: preview-renderer
+        if: runner.os == 'Windows'
+        working-directory: frontend
+        env:
+          VITE_ASGARD_MODE: preview
+          REACT_APP_BACKEND_URL: https://wrong-preview.invalid
+        run: npm run build -- --outDir dist-preview
+      - name: Documented PowerShell setup and actual Windows Electron foundation
+        if: runner.os == 'Windows'
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-desktop.ps1 -Validate
+      - name: Real Chromium preview and same-origin registration
+        if: always() && runner.os == 'Windows' && steps.preview-renderer.outcome == 'success'
+        working-directory: desktop
+        run: npm run test:preview-browser
+      - name: Desktop dependency advisory gate
+        working-directory: desktop
+        run: npm audit --audit-level=moderate
+      - name: Frontend dependency advisory gate
+        working-directory: frontend
+        run: npm audit --audit-level=moderate
+      - name: Record dependency advisories
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p test_reports/dependencies
+          (cd desktop && npm audit --json) > test_reports/dependencies/desktop-audit.json || true
+          (cd frontend && npm audit --json) > test_reports/dependencies/frontend-audit.json || true
+      - name: Dependency lock evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-lock-${{ matrix.os }}
+          path: backend/uv.lock
+          if-no-files-found: error
+          retention-days: 7
+      - name: Test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-evidence-${{ matrix.os }}
+          path: |
+            test_reports/native-windows/
+            test_reports/preview-browser/
+            test_reports/dependencies/
+            test_reports/pytest/
+          retention-days: 7

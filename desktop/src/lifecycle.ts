@@ -88,6 +88,7 @@ export class Lifecycle {
   private recoveryAbort: AbortController | null = null;
 
   // Joinable in-flight operations (the coordination core).
+  private bootPromise: Promise<void> | null = null;
   private startTask: Promise<unknown> | null = null; // a start attempt incl. its own settle/cleanup
   private cleanupPromise: Promise<void> | null = null; // the actual owned-child stop in progress
   private recoveryPromise: Promise<HandshakeIdentity> | null = null;
@@ -163,20 +164,41 @@ export class Lifecycle {
 
   // --- initial boot ----------------------------------------------------------
 
-  async boot(): Promise<void> {
+  boot(): Promise<void> {
+    // A controller owns one desktop session. Terminal state must remain terminal,
+    // and overlapping launch requests must share the same startup operation.
+    if (this.quitting || this.state === "stopping" || this.state === "stopped") {
+      return Promise.resolve();
+    }
+    if (this.bootPromise) return this.bootPromise;
+    if (this.state !== "idle") return Promise.resolve();
+    this.bootPromise = this.runBoot().finally(() => {
+      this.bootPromise = null;
+    });
+    return this.bootPromise;
+  }
+
+  private async runBoot(): Promise<void> {
     this.state = "starting";
     this.restarting = true;
     try {
       for (;;) {
         if (this.quitting) return;
         await this.cleanupBackend();
+        // cleanupBackend yields even when there was nothing to stop. Shutdown
+        // may have completed during that yield; do not create a new owner after
+        // shutdown took its snapshot of the in-flight startup task.
+        if (this.quitting) return;
         this.deps.destroyWindow();
+        if (this.quitting) return;
         this.deps.createWindow();
+        if (this.quitting) return;
         const ac = this.newAttemptSignal("boot");
         try {
           // The attempt (start + adopt + quitting-teardown) is one joinable unit
           // so shutdown can wait for a starter that has not returned its handle.
-          const attempt = (async (): Promise<number | null> => {
+          const attempt: Promise<number | null> = Promise.resolve().then(async () => {
+            if (this.quitting || ac.signal.aborted) return null;
             const be = await this.deps.startBackend(ac.signal);
             const epoch = this.adopt(be);
             if (this.quitting) {
@@ -184,7 +206,9 @@ export class Lifecycle {
               return null;
             }
             return epoch;
-          })();
+          });
+          // Register ownership before invoking the injected starter. Even a
+          // synchronous cancellation callback can now join the registered task.
           this.startTask = attempt;
           let epoch: number | null;
           try {
