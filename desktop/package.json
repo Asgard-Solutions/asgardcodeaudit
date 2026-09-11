@@ -9,7 +9,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dev": "node build.mjs && electron dist/main.js",
     "start": "electron dist/main.js",
-    "test": "vitest run && node --test tests/lifecycle-startup.test.cjs"
+    "test": "vitest run && node --test tests/lifecycle-startup.test.cjs",
+    "test:native": "node tests/run-native-smoke.cjs",
+    "test:preview-browser": "electron tests/preview-browser.cjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
