@@ -1,0 +1,64 @@
+name: Phase 1 validation
+on:
+  push:
+    branches: [main, fix/phase1-completion-20260911]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  foundation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v6
+      - name: Runtime versions
+        run: |
+          node --version
+          python --version
+          uv --version
+      - name: Resolve backend dependencies
+        working-directory: backend
+        run: uv lock
+      - name: Backend tests
+        working-directory: backend
+        run: uv run --locked --group test python -m pytest tests/ --ignore=tests/test_external_preview.py
+      - name: Desktop dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Desktop tests and build
+        working-directory: desktop
+        run: |
+          npm test
+          node --test tests/lifecycle-startup.test.cjs
+          npm run build
+      - name: Frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend tests and renderer build
+        working-directory: frontend
+        env:
+          VITE_ASGARD_MODE: desktop
+        run: |
+          npm test
+          npm run build
+      - name: Dependency lock evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-lock-${{ matrix.os }}
+          path: backend/uv.lock
+          if-no-files-found: warn
+          retention-days: 7
