@@ -5,9 +5,11 @@ const os = require('node:os');
 const { spawn, execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 if (process.platform !== 'win32') throw new Error('Native smoke requires Windows.');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asgard-phase1-'));
+const root = fs.realpathSync(fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'asgard-phase1-')));
 const source = path.join(root, 'Source Folder With Spaces');
 fs.mkdirSync(source);
+// Electron app.setPath requires the target directory to exist.
+fs.mkdirSync(path.join(root, 'app-data'));
 const file = path.join(source, 'README.md');
 fs.writeFileSync(file, 'Synthetic source fixture. The auditor must not change this file.\n');
 const hash = () => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
