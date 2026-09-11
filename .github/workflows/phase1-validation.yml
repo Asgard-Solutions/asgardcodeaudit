@@ -68,10 +68,9 @@ jobs:
           VITE_ASGARD_MODE: preview
           REACT_APP_BACKEND_URL: https://wrong-preview.invalid
         run: npm run build -- --outDir dist-preview
-      - name: Actual Windows Electron foundation
+      - name: Documented PowerShell setup and actual Windows Electron foundation
         if: runner.os == 'Windows'
-        working-directory: desktop
-        run: npm run test:native
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-desktop.ps1 -Validate
       - name: Real Chromium preview and same-origin registration
         if: always() && runner.os == 'Windows' && steps.preview-renderer.outcome == 'success'
         working-directory: desktop
