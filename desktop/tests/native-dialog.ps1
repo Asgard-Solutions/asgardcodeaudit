@@ -14,7 +14,6 @@ $condition = [System.Windows.Automation.AndCondition]::new($nameCondition, $proc
 $deadline = [DateTime]::UtcNow.AddSeconds(12)
 $window = $null
 while ([DateTime]::UtcNow -lt $deadline) {
-    # Modal dialogs may be descendants of their owner rather than root children.
     $window = [System.Windows.Automation.AutomationElement]::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
     if ($null -ne $window) { break }
     Start-Sleep -Milliseconds 100
@@ -28,7 +27,7 @@ if ($null -eq $window) {
     $owned = [System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $processCondition)
     $ownedNames = @()
     foreach ($item in $owned) { $ownedNames += @{name=$item.Current.Name; type=$item.Current.ControlType.ProgrammaticName; class=$item.Current.ClassName} }
-    Write-Output (@{owner=$OwnerPid; windows=$records; owned=$ownedNames} | ConvertTo-Json -Depth 5 -Compress)
+    [Console]::Error.WriteLine((@{owner=$OwnerPid; windows=$records; owned=$ownedNames} | ConvertTo-Json -Depth 5 -Compress))
     throw 'The owned native folder dialog was not found in the automation tree.'
 }
 $shell = New-Object -ComObject WScript.Shell
