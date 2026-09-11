@@ -34,5 +34,31 @@ G-1 renderer isolation/IPC-in-window · G-2 loopback+stdin-secret in-process + s
 ## Next task
 Await Phase 1 review. On approval, begin Phase 2 (safe snapshot + real inventory) only.
 
+## Phase 1 correction pass 3 — integrated desktop completion (2026-09-11)
+Connected the renderer↔bridge↔router↔lifecycle path per the six reviewer findings
+(reproduced first, kept open until each regression passed):
+1. Dedicated typed `handshake()` Transport method (public handshake stays OUT of the
+   generic REQUEST allow-list); consistent across client, both adapters, preload, main.
+2. Launch `app://asgard/` (→ `/` Overview); sender validation by parsed ORIGIN + main
+   frame (not exact URL, not prefix); protocol authority guard; legit route changes keep IPC.
+3. Injectable `desktop/src/lifecycle.ts`: internal retry cleanup never quits; intentional
+   quit awaits one shared idempotent backend shutdown; replacement starts only after full
+   cleanup; post-readiness crash → in-app "Backend unavailable" + bounded `retryBackend()`;
+   epoch guard ignores late exits; approved narrow bridge additions `onBackendUnavailable`
+   (replay-on-subscribe) + `retryBackend`.
+4. Readiness combines overall deadline + per-request timeout + caller cancel over the whole
+   op incl. body read; re-checks final state before returning; abortable polling.
+5. Serializable `{ok|error}` envelope across every IPC handler; renderer rebuilds `ApiError`;
+   sanitized/bounded messages; no raw bodies/secrets.
+6. All three lockfiles present; status/dates corrected.
+Evidence (2026-09-11, target toolchains): backend pytest **24 passed** on Python 3.13.15
+(`uv run --frozen --group test --python 3.13 python -m pytest ... --ignore=tests/test_external_preview.py`);
+desktop vitest **51 passed** and frontend vitest **9 passed** on Node 24.21.0; tsc + desktop
+build clean; preload 0 local require; desktop bundle 0 preview-code hits. Python 3.11 not run
+(project pins `requires-python>=3.13`). Modeled Electron/jsdom substitutions are labeled and do
+NOT close Windows gates G-1..G-4. Preview headless GUI boot is a pre-existing env condition
+(reproduces at fork baseline with changes stashed); backend verified via curl. See
+docs/IMPLEMENTATION_STATUS.md §5 for the full finding→files→tests mapping.
+
 ## Phase 1 correction pass 2 (2026-06)
 Desktop foundation hardened: esbuild-bundled sandbox preload (no local require); custom `app://` protocol serving packaged assets (traversal-rejecting, SPA fallback), CSP scoped to app origin; backend readiness now validates schema identity + authenticated probe with per-request abort + overall deadline, handles spawn/early-exit/EPIPE/cancel, redacted bounded logs, idempotent stop, retry without window/child accumulation; IPC changed from path-prefix to explicit operation allow-list + body validation + exact main-frame/origin sender check; preview origin policy now same-origin + exact allow-list (no suffix wildcard/blanket localhost); invalid ASGARD_MODE raises (no silent preview). Desktop-mode build verified to exclude preview code (0 hits). Lockfiles: backend/uv.lock, frontend/package-lock.json, desktop/package-lock.json. Tests: backend 24 (3.11+3.13), desktop vitest 19, frontend vitest 6. Windows/Electron gates G-1..G-4 remain not-natively-run.

@@ -7,8 +7,12 @@ import net from "node:net";
 // - passes a random per-launch session secret over the child's stdin pipe
 // - validates a schema-defined readiness response AND an authenticated request
 //   before the backend is treated as usable
-// - bounded startup (per-request abort + overall deadline), cancellation, and
-//   idempotent/bounded shutdown of ONLY the process it owns.
+// - bounded startup: the overall deadline, the per-request timeout, AND caller
+//   cancellation apply to the COMPLETE readiness operation (request initiation
+//   and response-body reading). A late success never revives a cancelled or
+//   expired attempt: liveness/deadline/cancellation are re-checked before a
+//   usable handle is returned.
+// - idempotent/bounded shutdown of ONLY the process it owns.
 
 export class BackendStartError extends Error {
   code: string;
@@ -26,6 +30,8 @@ export interface BackendHandle {
   stopped: boolean;
   stop: () => Promise<void>;
   recentLogs: () => string;
+  // Register a callback for process exit. Fires immediately if already exited.
+  onExit: (cb: (info: { code: number | null; signal: NodeJS.Signals | null }) => void) => void;
 }
 
 export interface SpawnOptions {
@@ -54,21 +60,40 @@ export async function freeLoopbackPort(): Promise<number> {
 
 // --- readiness validation (separately testable) ----------------------------
 
-async function fetchJson(url: string, perRequestMs: number, init?: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, signal: AbortSignal.timeout(perRequestMs) });
+export interface ReadinessOpts {
+  perRequestMs: number;
+  endAt?: number; // absolute deadline (Date.now()+deadlineMs); undefined = no overall cap
+  signal?: AbortSignal;
 }
 
-export async function checkReadiness(baseUrl: string, secret: string, perRequestMs: number): Promise<void> {
+// Build a signal that trips on: caller cancellation, the per-request timeout,
+// OR the remaining overall deadline — whichever comes first. This governs both
+// request initiation and body reading (fetch aborts the whole exchange).
+function requestSignal(opts: ReadinessOpts): AbortSignal {
+  const remaining = opts.endAt === undefined ? Number.POSITIVE_INFINITY : opts.endAt - Date.now();
+  if (remaining <= 0) {
+    const ac = new AbortController();
+    ac.abort();
+    return ac.signal;
+  }
+  const budget = Math.max(1, Math.min(opts.perRequestMs, remaining));
+  const signals: AbortSignal[] = [AbortSignal.timeout(budget)];
+  if (opts.signal) signals.push(opts.signal);
+  return AbortSignal.any(signals);
+}
+
+export async function checkReadiness(baseUrl: string, secret: string, opts: ReadinessOpts): Promise<void> {
   // 1) unauthenticated readiness identity
-  const hs = await fetchJson(`${baseUrl}/api/v1/startup/handshake`, perRequestMs);
+  const hs = await fetch(`${baseUrl}/api/v1/startup/handshake`, { signal: requestSignal(opts) });
   if (!hs.ok) throw new BackendStartError("not_ready", `handshake status ${hs.status}`);
   const id = (await hs.json()) as { status?: string; name?: string; mode?: string };
   if (id.status !== "ready" || id.name !== "Asgard CodeAudit" || id.mode !== "desktop") {
     throw new BackendStartError("wrong_identity", `unexpected readiness identity: ${JSON.stringify(id)}`);
   }
   // 2) authenticated request proves the per-launch secret reached the backend
-  const auth = await fetchJson(`${baseUrl}/api/v1/build`, perRequestMs, {
+  const auth = await fetch(`${baseUrl}/api/v1/build`, {
     headers: { Authorization: `Bearer ${secret}` },
+    signal: requestSignal(opts),
   });
   if (auth.status === 401) throw new BackendStartError("auth_failed", "authenticated probe rejected");
   if (!auth.ok) throw new BackendStartError("not_ready", `build status ${auth.status}`);
@@ -78,29 +103,55 @@ export async function checkReadiness(baseUrl: string, secret: string, perRequest
   }
 }
 
+function abortableDelay(ms: number, endAt: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const remaining = Math.min(ms, endAt - Date.now());
+    if (remaining <= 0) return resolve();
+    let onAbort: (() => void) | null = null;
+    const t = setTimeout(() => {
+      if (onAbort && signal) signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, remaining);
+    if (signal) {
+      onAbort = () => {
+        clearTimeout(t);
+        reject(new BackendStartError("cancelled", "startup cancelled"));
+      };
+      if (signal.aborted) return onAbort();
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+}
+
 export async function waitForReady(
   baseUrl: string,
   secret: string,
   opts: { deadlineMs: number; perRequestMs: number; signal?: AbortSignal; isAlive?: () => boolean }
 ): Promise<void> {
-  const end = Date.now() + opts.deadlineMs;
+  const endAt = Date.now() + opts.deadlineMs;
   let lastErr = "no response";
-  while (Date.now() < end) {
+  for (;;) {
     if (opts.signal?.aborted) throw new BackendStartError("cancelled", "startup cancelled");
+    if (Date.now() >= endAt) throw new BackendStartError("timeout", `backend not ready within ${opts.deadlineMs}ms (${lastErr})`);
     if (opts.isAlive && !opts.isAlive()) throw new BackendStartError("exited", "backend exited during startup");
     try {
-      await checkReadiness(baseUrl, secret, opts.perRequestMs);
+      await checkReadiness(baseUrl, secret, { perRequestMs: opts.perRequestMs, endAt, signal: opts.signal });
+      // Re-check the final state BEFORE returning a usable handle. A response
+      // that only arrived after cancellation or the deadline is discarded.
+      if (opts.signal?.aborted) throw new BackendStartError("cancelled", "startup cancelled");
+      if (Date.now() >= endAt) throw new BackendStartError("timeout", "backend became ready after the deadline");
+      if (opts.isAlive && !opts.isAlive()) throw new BackendStartError("exited", "backend exited during startup");
       return;
     } catch (e) {
-      if (e instanceof BackendStartError && (e.code === "auth_failed" || e.code === "wrong_identity")) {
-        // deterministic failures: a wrong/unrelated server won't become right
-        throw e;
+      if (opts.signal?.aborted) throw new BackendStartError("cancelled", "startup cancelled");
+      if (e instanceof BackendStartError) {
+        if (e.code === "cancelled" || e.code === "timeout" || e.code === "exited") throw e;
+        if (e.code === "auth_failed" || e.code === "wrong_identity") throw e; // deterministic
       }
       lastErr = e instanceof Error ? e.message : String(e);
     }
-    await new Promise((r) => setTimeout(r, 250));
+    await abortableDelay(250, endAt, opts.signal);
   }
-  throw new BackendStartError("timeout", `backend not ready within ${opts.deadlineMs}ms (${lastErr})`);
 }
 
 // --- process lifecycle ------------------------------------------------------
@@ -118,13 +169,15 @@ function resolveCommand(opts: SpawnOptions, host: string, port: number): { cmd: 
 
 function makeStop(proc: ChildProcess, graceMs: number): { stop: () => Promise<void>; state: { stopped: boolean } } {
   const state = { stopped: false };
-  const stop = async () => {
+  let inflight: Promise<void> | null = null;
+  const stop = () => {
+    if (inflight) return inflight; // repeated stops share the same cleanup outcome
     if (state.stopped || proc.exitCode !== null || proc.signalCode !== null) {
       state.stopped = true;
-      return;
+      return Promise.resolve();
     }
     state.stopped = true;
-    await new Promise<void>((resolve) => {
+    inflight = new Promise<void>((resolve) => {
       let done = false;
       const finish = () => {
         if (!done) {
@@ -149,6 +202,7 @@ function makeStop(proc: ChildProcess, graceMs: number): { stop: () => Promise<vo
         finish();
       }, graceMs);
     });
+    return inflight;
   };
   return { stop, state };
 }
@@ -182,6 +236,7 @@ export async function startBackend(opts: SpawnOptions): Promise<BackendHandle> {
 
   let alive = true;
   let earlyExit: string | null = null;
+  const exitCbs: Array<(info: { code: number | null; signal: NodeJS.Signals | null }) => void> = [];
   const spawnErr: Promise<never> = new Promise((_, reject) => {
     proc.once("error", (e) => {
       alive = false;
@@ -190,6 +245,7 @@ export async function startBackend(opts: SpawnOptions): Promise<BackendHandle> {
     proc.once("exit", (code, sig) => {
       alive = false;
       earlyExit = `exit code=${code} signal=${sig}`;
+      for (const cb of exitCbs.splice(0)) cb({ code, signal: sig });
     });
   });
 
@@ -204,6 +260,13 @@ export async function startBackend(opts: SpawnOptions): Promise<BackendHandle> {
     },
     stop,
     recentLogs: () => logs,
+    onExit: (cb) => {
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        cb({ code: proc.exitCode, signal: proc.signalCode });
+      } else {
+        exitCbs.push(cb);
+      }
+    },
   } as BackendHandle;
 
   try {
@@ -225,10 +288,10 @@ export async function startBackend(opts: SpawnOptions): Promise<BackendHandle> {
     ]);
     return handle;
   } catch (e) {
-    // A failed start must terminate and reap its owned child before returning.
+    // A failed/cancelled start must terminate and reap its owned child before returning.
     await stop();
     if (e instanceof BackendStartError) {
-      if (earlyExit && e.code !== "spawn_failed") {
+      if (earlyExit && e.code !== "spawn_failed" && e.code !== "cancelled") {
         throw new BackendStartError("exited", `backend exited during startup (${earlyExit}). ${handle.recentLogs()}`);
       }
       throw e;

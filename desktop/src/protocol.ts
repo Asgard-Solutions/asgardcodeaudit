@@ -41,5 +41,24 @@ export function mimeFor(filePath: string): string {
 
 export const APP_SCHEME = "app";
 export const APP_HOST = "asgard";
-export const APP_INDEX_URL = `${APP_SCHEME}://${APP_HOST}/index.html`;
 export const APP_ORIGIN = `${APP_SCHEME}://${APP_HOST}`;
+// Launch URL resolves to the "/" route (Overview). index.html is still served
+// internally by the SPA fallback for this and every supported application route.
+export const APP_LAUNCH_URL = `${APP_ORIGIN}/`;
+export const APP_INDEX_URL = `${APP_ORIGIN}/index.html`;
+
+// Authority check for the custom protocol handler: only the exact approved
+// scheme + host, with no port and no embedded credentials, may be served.
+export function isApprovedAuthority(requestUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(requestUrl);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== `${APP_SCHEME}:`) return false;
+  if (url.hostname !== APP_HOST) return false;
+  if (url.port) return false;
+  if (url.username || url.password) return false;
+  return true;
+}

@@ -2,6 +2,7 @@ import { getTransport } from "@/transport";
 import { ApiError } from "@/transport/contract";
 import type {
   Handshake,
+  BackendStatus,
   BuildIdentity,
   Diagnostics,
   Fixture,
@@ -21,7 +22,20 @@ export const api = {
     }
     return transport.selectFolder();
   },
-  handshake: () => t().request<Handshake>("GET", "/api/v1/startup/handshake"),
+  handshake: () => t().handshake(),
+  // Desktop-only recovery after a post-startup backend crash.
+  retryBackend: async (): Promise<Handshake> => {
+    const transport = t();
+    if (!transport.retryBackend) {
+      throw new ApiError(0, "Backend recovery is only available in the desktop app.");
+    }
+    return transport.retryBackend();
+  },
+  onBackendUnavailable: (cb: (status: BackendStatus) => void): (() => void) => {
+    const transport = t();
+    if (!transport.onBackendUnavailable) return () => {};
+    return transport.onBackendUnavailable(cb);
+  },
   build: () => t().request<BuildIdentity>("GET", "/api/v1/build"),
   diagnostics: () => t().request<Diagnostics>("GET", "/api/v1/diagnostics"),
   fixtures: () => t().request<Fixture[]>("GET", "/api/v1/preview/fixtures"),

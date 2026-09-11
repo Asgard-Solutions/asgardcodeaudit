@@ -12,7 +12,11 @@ interface ImportMeta {
 interface AsgardBridge {
   request: (method: string, path: string, body?: unknown) => Promise<unknown>;
   handshake: () => Promise<unknown>;
-  selectFolder: () => Promise<string | null>;
+  selectFolder: () => Promise<unknown>;
+  retryBackend: () => Promise<unknown>;
+  onBackendUnavailable: (
+    callback: (status: { reason: string; message: string }) => void
+  ) => () => void;
 }
 
 interface Window {

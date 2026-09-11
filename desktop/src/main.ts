@@ -5,20 +5,32 @@ import {
   ipcMain,
   net,
   protocol,
+  type IpcMainEvent,
   type IpcMainInvokeEvent,
 } from "electron";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { IPC, resolveOperation, validateBody, isTrustedFrame, IpcValidationError } from "./ipc";
+import {
+  IPC,
+  resolveOperation,
+  validateBody,
+  isTrustedFrame,
+  IpcValidationError,
+  ipcOk,
+  ipcFail,
+  type IpcResult,
+} from "./ipc";
 import { startBackend, type BackendHandle } from "./backend-process";
 import { secureWebPreferences, applyContentSecurityPolicy, lockDownNavigation } from "./security";
 import {
   APP_SCHEME,
-  APP_INDEX_URL,
+  APP_ORIGIN,
+  APP_LAUNCH_URL,
   resolveAssetPath,
   mimeFor,
+  isApprovedAuthority,
 } from "./protocol";
+import { Lifecycle, type LifecycleBackend } from "./lifecycle";
 
 let mainWindow: BrowserWindow | null = null;
 let backend: BackendHandle | null = null;
@@ -34,6 +46,7 @@ protocol.registerSchemesAsPrivileged([
 
 function registerAppProtocol(): void {
   protocol.handle(APP_SCHEME, async (request) => {
+    if (!isApprovedAuthority(request.url)) return new Response("Forbidden", { status: 403 });
     const { pathname } = new URL(request.url);
     const filePath = resolveAssetPath(RENDERER_DIST, pathname);
     if (!filePath) return new Response("Forbidden", { status: 403 });
@@ -50,149 +63,188 @@ function registerAppProtocol(): void {
 }
 
 // --- IPC sender validation -------------------------------------------------
-function assertTrustedSender(event: IpcMainInvokeEvent): void {
-  if (!mainWindow || event.sender !== mainWindow.webContents) {
-    throw new Error("Rejected IPC: unknown WebContents.");
-  }
+// The sender must be the current top-level main frame of the owned window AND
+// carry the exact approved application origin. Legitimate same-document route
+// changes keep access; other windows, subframes, and unexpected authorities do not.
+function isTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): boolean {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return false;
   const frame = event.senderFrame;
   const isMainFrame = !!frame && frame.parent === null;
-  if (!isTrustedFrame(frame?.url, isMainFrame, APP_INDEX_URL)) {
-    throw new Error("Rejected IPC: sender is not the approved top-level app frame.");
-  }
+  return isTrustedFrame(frame?.url, isMainFrame, APP_ORIGIN);
 }
 
 function backendUrl(p: string): string {
   return `http://${backend!.host}:${backend!.port}${p}`;
 }
 
-function registerIpc(): void {
-  ipcMain.handle(IPC.HANDSHAKE, async (event) => {
-    assertTrustedSender(event);
-    if (!backend) throw new Error("Backend not started.");
-    const res = await net.fetch(backendUrl("/api/v1/startup/handshake"));
-    if (!res.ok) throw new Error(`Handshake failed (${res.status}).`);
-    return res.json();
+async function callBackend<T>(method: string, apiPath: string, body?: unknown): Promise<IpcResult<T>> {
+  if (!backend) return ipcFail("The local analysis backend is unavailable.", 503, "backend_unavailable");
+  let res: Response;
+  try {
+    res = await net.fetch(backendUrl(apiPath), {
+      method,
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${backend.secret}` },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    return ipcFail("The local analysis backend is unavailable.", 503, "backend_unavailable");
+  }
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = text ? JSON.parse(text) : undefined;
+  } catch {
+    return ipcFail("The backend returned a malformed response.", 502, "malformed_response");
+  }
+  if (!res.ok) {
+    const detail = (data as { detail?: unknown } | undefined)?.detail;
+    let message = `Request failed (${res.status}).`;
+    let code: string | undefined;
+    if (detail && typeof detail === "object") {
+      const d = detail as { message?: unknown; code?: unknown };
+      if (typeof d.message === "string") message = d.message;
+      if (typeof d.code === "string") code = d.code;
+    } else if (typeof detail === "string") {
+      message = detail;
+    }
+    return ipcFail(message, res.status, code);
+  }
+  return ipcOk(data as T);
+}
+
+function registerIpc(lifecycle: Lifecycle): void {
+  ipcMain.handle(IPC.HANDSHAKE, async (event): Promise<IpcResult<unknown>> => {
+    if (!isTrustedSender(event)) return ipcFail("Rejected: untrusted sender.", 403, "untrusted_sender");
+    return callBackend("GET", "/api/v1/startup/handshake");
   });
 
-  ipcMain.handle(IPC.REQUEST, async (event, payload: unknown) => {
-    assertTrustedSender(event);
-    if (!backend) throw new Error("Backend not started.");
+  ipcMain.handle(IPC.REQUEST, async (event, payload: unknown): Promise<IpcResult<unknown>> => {
+    if (!isTrustedSender(event)) return ipcFail("Rejected: untrusted sender.", 403, "untrusted_sender");
     const { method, path: apiPath, body } = (payload ?? {}) as {
       method?: unknown;
       path?: unknown;
       body?: unknown;
     };
-    let op, validBody;
     try {
-      op = resolveOperation(method, apiPath);
-      validBody = validateBody(op, body);
+      const op = resolveOperation(method, apiPath);
+      const validBody = validateBody(op, body);
+      return await callBackend(op.method, apiPath as string, validBody);
     } catch (e) {
-      if (e instanceof IpcValidationError) {
-        const err = new Error(e.message);
-        (err as { code?: string }).code = "ipc_validation";
-        throw err;
-      }
-      throw e;
+      if (e instanceof IpcValidationError) return ipcFail(e.message, 400, "ipc_validation");
+      return ipcFail("The request could not be processed.", 500, "ipc_error");
     }
-    const res = await net.fetch(backendUrl(apiPath as string), {
-      method: op.method,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${backend.secret}`, // secret stays in main
-      },
-      body: validBody === undefined ? undefined : JSON.stringify(validBody),
-    });
-    const text = await res.text();
-    const data = text ? JSON.parse(text) : undefined;
-    if (!res.ok) {
-      const detail = data?.detail;
-      const message =
-        detail && typeof detail === "object" ? detail.message : detail ?? `Request failed (${res.status}).`;
-      const err = new Error(message);
-      (err as { code?: string; status?: number }).code = detail?.code;
-      (err as { status?: number }).status = res.status;
-      throw err;
-    }
-    return data;
   });
 
-  ipcMain.handle(IPC.SELECT_FOLDER, async (event) => {
-    assertTrustedSender(event);
-    if (!mainWindow) throw new Error("No window.");
+  ipcMain.handle(IPC.SELECT_FOLDER, async (event): Promise<IpcResult<string | null>> => {
+    if (!isTrustedSender(event)) return ipcFail("Rejected: untrusted sender.", 403, "untrusted_sender");
+    if (!mainWindow) return ipcFail("No application window is available.", 500, "no_window");
     const result = await dialog.showOpenDialog(mainWindow, {
       title: "Choose a source folder to register",
       properties: ["openDirectory"],
     });
-    if (result.canceled || result.filePaths.length === 0) return null;
-    return result.filePaths[0];
+    if (result.canceled || result.filePaths.length === 0) return ipcOk(null);
+    return ipcOk(result.filePaths[0]);
+  });
+
+  ipcMain.handle(IPC.RETRY_BACKEND, async (event): Promise<IpcResult<unknown>> => {
+    if (!isTrustedSender(event)) return ipcFail("Rejected: untrusted sender.", 403, "untrusted_sender");
+    try {
+      const identity = await lifecycle.retry();
+      return ipcOk(identity);
+    } catch (e) {
+      const err = e as { code?: string; message?: string };
+      return ipcFail(err?.message ?? "Recovery failed.", 503, err?.code ?? "recovery_failed");
+    }
+  });
+
+  // Renderer announces it is listening; replay the current status if unavailable
+  // (covers a crash that happened before the renderer subscribed).
+  ipcMain.on(IPC.BACKEND_SUBSCRIBE, (event) => {
+    if (!isTrustedSender(event)) return;
+    const status = lifecycle.getUnavailableStatus();
+    if (status) event.sender.send(IPC.BACKEND_UNAVAILABLE, status);
   });
 }
 
-function destroyWindow(): void {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
-  mainWindow = null;
-}
-
-async function stopBackend(): Promise<void> {
-  if (backend) {
-    await backend.stop();
-    backend = null;
-  }
-}
-
-// Single retry loop — never accumulates hidden windows or child processes.
-async function bootWithRetry(): Promise<void> {
-  for (;;) {
-    // fresh window + backend each attempt
-    destroyWindow();
-    await stopBackend();
-
-    mainWindow = new BrowserWindow({
-      width: 1280,
-      height: 820,
-      backgroundColor: "#0b0d10",
-      show: false,
-      webPreferences: secureWebPreferences(path.join(__dirname, "preload.js")),
-    });
-    lockDownNavigation(mainWindow);
-
-    try {
-      backend = await startBackend({
+// --- Electron-backed lifecycle dependencies --------------------------------
+function createLifecycle(): Lifecycle {
+  return new Lifecycle({
+    createWindow: () => {
+      mainWindow = new BrowserWindow({
+        width: 1280,
+        height: 820,
+        backgroundColor: "#0b0d10",
+        show: false,
+        webPreferences: secureWebPreferences(path.join(__dirname, "preload.js")),
+      });
+      lockDownNavigation(mainWindow);
+    },
+    destroyWindow: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
+      mainWindow = null;
+    },
+    startBackend: async (signal): Promise<LifecycleBackend> => {
+      const handle = await startBackend({
         backendExe: process.env.ASGARD_BACKEND_EXE,
         pythonCmd: process.env.ASGARD_PYTHON ?? "python",
         backendDir: BACKEND_DIR,
         dataDir: app.getPath("userData"),
+        signal,
       });
-      await mainWindow.loadURL(APP_INDEX_URL);
+      backend = handle;
+      return {
+        stop: async () => {
+          await handle.stop();
+          if (backend === handle) backend = null;
+        },
+        recentLogs: () => handle.recentLogs(),
+        onExit: (cb) => handle.onExit(() => cb()),
+      };
+    },
+    loadAppAndShow: async () => {
+      if (!mainWindow) throw new Error("No window to load.");
+      await mainWindow.loadURL(APP_LAUNCH_URL);
       mainWindow.show();
-      return;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const owned = backend?.recentLogs?.() ?? "";
-      await stopBackend();
-      destroyWindow();
+    },
+    fetchHandshake: async () => {
+      const res = await callBackend<{
+        status: string;
+        name: string;
+        version: string;
+        source_revision: string | null;
+        mode: string;
+      }>("GET", "/api/v1/startup/handshake");
+      if (!res.ok) throw new Error(res.error.message);
+      return res.data;
+    },
+    showStartupErrorDialog: async (detail) => {
       const choice = await dialog.showMessageBox({
         type: "error",
         title: "Asgard CodeAudit — backend failed to start",
         message: "The local analysis backend did not start.",
-        detail: owned ? `${message}\n\n${owned}` : message,
+        detail,
         buttons: ["Retry", "Quit"],
         defaultId: 0,
         cancelId: 1,
       });
-      if (choice.response !== 0) {
-        app.quit();
-        return;
+      return choice.response === 0;
+    },
+    notifyUnavailable: (status) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(IPC.BACKEND_UNAVAILABLE, status);
       }
-      // loop to retry with a brand-new window + child
-    }
-  }
+    },
+    quit: () => app.quit(),
+  });
 }
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  const lifecycle = createLifecycle();
+  let cleanupDone = false;
+
   app.on("second-instance", () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -203,21 +255,26 @@ if (!gotLock) {
   app.whenReady().then(() => {
     registerAppProtocol();
     applyContentSecurityPolicy();
-    registerIpc();
-    void bootWithRetry();
+    registerIpc(lifecycle);
+    void lifecycle.boot();
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) void bootWithRetry();
+      if (BrowserWindow.getAllWindows().length === 0) void lifecycle.boot();
     });
   });
 
   app.on("window-all-closed", () => {
-    void stopBackend();
+    // Internal retry churn destroys windows without meaning an intentional quit.
+    if (lifecycle.isRestarting()) return;
     if (process.platform !== "darwin") app.quit();
   });
 
-  app.on("before-quit", () => {
-    void stopBackend();
+  app.on("before-quit", (event) => {
+    // Wait for bounded cleanup of the owned backend before the process exits.
+    if (cleanupDone) return;
+    event.preventDefault();
+    void lifecycle.shutdown().finally(() => {
+      cleanupDone = true;
+      app.quit();
+    });
   });
-
-  void pathToFileURL; // reserved for future file-scheme helpers
 }

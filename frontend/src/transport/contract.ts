@@ -75,11 +75,22 @@ export interface CreateProjectInput {
   source_sharing_policy?: "offline" | "lan-only" | "online";
 }
 
+export interface BackendStatus {
+  reason: string;
+  message: string;
+}
+
 export interface Transport {
   readonly mode: Mode;
   init(): Promise<void>;
+  // Dedicated, typed startup readiness/identity operation. Consistent across
+  // adapters; never travels the generic request allow-list.
+  handshake(): Promise<Handshake>;
   request<T>(method: string, path: string, body?: unknown): Promise<T>;
   selectFolder?(): Promise<string | null>;
+  // Desktop-only recovery surface (undefined in preview).
+  retryBackend?(): Promise<Handshake>;
+  onBackendUnavailable?(cb: (status: BackendStatus) => void): () => void;
 }
 
 export class ApiError extends Error {

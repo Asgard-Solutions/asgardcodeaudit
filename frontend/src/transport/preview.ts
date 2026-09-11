@@ -1,4 +1,4 @@
-import { ApiError, type Transport } from "./contract";
+import { ApiError, type Handshake, type Transport } from "./contract";
 
 // Preview adapter: authenticated same-origin transport through the platform
 // ingress. Obtains an in-memory dev session token from the backend handshake
@@ -25,6 +25,18 @@ export class PreviewTransport implements Transport {
       throw new ApiError(res.status, `Preview session handshake failed (${res.status}).`);
     }
     this.token = (await res.json()).token;
+  }
+
+  async handshake(): Promise<Handshake> {
+    // Dedicated, typed readiness/identity operation. The public startup handshake
+    // is unauthenticated; it does not travel the generic request path.
+    const res = await fetch(url("/api/v1/startup/handshake"), {
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) {
+      throw new ApiError(res.status, `Startup handshake failed (${res.status}).`);
+    }
+    return (await res.json()) as Handshake;
   }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {

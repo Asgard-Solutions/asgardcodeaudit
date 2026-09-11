@@ -1,11 +1,17 @@
 // Pure, dependency-free IPC contract + validation (unit-testable without Electron).
 // This is an explicit OPERATION allow-list (exact method + route + body shape),
-// not a path-prefix filter. No general local HTTP proxy is exposed.
+// not a path-prefix filter. No general local HTTP proxy is exposed. Process
+// management (retry) is a dedicated named operation, never a generic request.
 
 export const IPC = {
   HANDSHAKE: "asgard:handshake",
   REQUEST: "asgard:request",
   SELECT_FOLDER: "asgard:selectFolder",
+  RETRY_BACKEND: "asgard:retryBackend",
+  // main -> renderer notification (typed, sanitized status only)
+  BACKEND_UNAVAILABLE: "asgard:backendUnavailable",
+  // renderer -> main "I am listening"; main replays the current status if any
+  BACKEND_SUBSCRIBE: "asgard:backendSubscribe",
 } as const;
 
 const ID = "[0-9a-f]{32}"; // uuid4 hex, as issued by the backend
@@ -17,7 +23,9 @@ export interface Operation {
   body?: "createProject" | "updateProject";
 }
 
-// Exactly the Phase 1 operations the renderer may invoke.
+// Exactly the Phase 1 data operations the renderer may invoke through REQUEST.
+// The public startup handshake is intentionally NOT here: it is handled by the
+// dedicated HANDSHAKE operation, so it never travels the generic REQUEST channel.
 export const OPERATIONS: Operation[] = [
   { name: "build", method: "GET", re: /^\/api\/v1\/build$/ },
   { name: "diagnostics", method: "GET", re: /^\/api\/v1\/diagnostics$/ },
@@ -106,14 +114,59 @@ export function validateApiRequest(method: unknown, path: unknown, body?: unknow
   return { method: op.method, path: path as string, body: validBody };
 }
 
-// Sender identity: must be the intended top-level frame AND the exact approved
-// application page. A matching URL scheme alone is insufficient.
+// --- Serializable result envelope ------------------------------------------
+// Electron's invoke/handle does NOT preserve custom Error properties across the
+// bridge, so we never throw typed errors to the renderer. Instead every handler
+// returns this envelope and the renderer adapter reconstructs an ApiError. The
+// message is bounded and sanitized; raw backend bodies/secrets never cross.
+
+export interface IpcOk<T> {
+  ok: true;
+  data: T;
+}
+export interface IpcErr {
+  ok: false;
+  error: { message: string; status: number; code?: string };
+}
+export type IpcResult<T> = IpcOk<T> | IpcErr;
+
+const MAX_ERR_LEN = 500;
+
+export function sanitizeMessage(message: unknown): string {
+  const raw = typeof message === "string" ? message : String(message ?? "");
+  // strip control chars, collapse whitespace, bound length
+  const clean = raw.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  return (clean || "An unexpected error occurred.").slice(0, MAX_ERR_LEN);
+}
+
+export function ipcOk<T>(data: T): IpcOk<T> {
+  return { ok: true, data };
+}
+
+export function ipcFail(message: unknown, status = 0, code?: string): IpcErr {
+  return { ok: false, error: { message: sanitizeMessage(message), status, code } };
+}
+
+// Sender identity: must be the intended top-level main frame AND carry the exact
+// approved application scheme + authority. A matching scheme alone, a different
+// authority, embedded credentials, or an explicit port are all rejected. Legit
+// same-document route changes (e.g. app://asgard/projects) keep access because
+// only the parsed ORIGIN is compared, never the exact URL.
 export function isTrustedFrame(
   senderUrl: string | undefined,
   isMainFrame: boolean,
-  expectedUrl: string
+  expectedOrigin: string
 ): boolean {
   if (!isMainFrame) return false;
   if (!senderUrl) return false;
-  return senderUrl === expectedUrl;
+  let url: URL;
+  try {
+    url = new URL(senderUrl);
+  } catch {
+    return false;
+  }
+  if (url.username || url.password) return false; // reject embedded credentials
+  if (url.port) return false; // the app origin has no port
+  const origin = `${url.protocol}//${url.hostname}`;
+  return origin === expectedOrigin;
 }
