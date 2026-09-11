@@ -32,19 +32,21 @@ Deliverable-repo mapping (preview flattens `apps/backend`→`backend`, `apps/web
 
 ## 3. F01–F09 implementation / verification matrix
 
-Verification environment key: **PY** = pytest on Python 3.11 (preview) **and** 3.13 (target); **UI** = live preview (Linux, labeled preview); **VT** = vitest; **WIN** = requires Windows/GUI + Electron binary (open gate, unverified here).
+Verification-category key: **PY** = pytest (Python 3.11 preview + 3.13 target, real process); **UI** = live preview browser (Linux, labeled preview); **VT-unit** = vitest pure-logic; **VT-proc** = vitest real Node child-process/HTTP; **WIN** = requires Windows/GUI + Electron binary (open gate, **not run**).
 
-| ID | Requirement | Implemented | Verified (env) | Notes / remaining |
-|---|---|---|---|---|
-| F01 | Native launch + backend readiness/build identity | Yes | Backend readiness **PY/UI**; native launch **WIN (unverified)** | `startup/handshake` + boot screen verified in preview; Electron launch is G-1/G-2 |
-| F02 | Startup failure → useful error + retry + diagnostics | Yes | Preview boot-error+retry **UI**; desktop dialog+retry **WIN (unverified)** | `main.ts` shows retry/quit dialog and respawns |
-| F03 | Native selection + validated registration | Yes | Path validation + dedupe + overlap **PY**; register flow **UI**; native dialog **WIN (unverified)** | `dialog.showOpenDialog` wired via IPC; preview uses fixtures |
-| F04 | Restart preserves projects/settings, no reseed | Yes | **PY** (`test_persistence_across_restart`) + **UI** | Alembic upgrade only; no seed on startup |
-| F05 | Removal leaves source untouched | Yes | **PY** (`test_remove_registration_leaves_source_untouched`) + **UI** | DELETE removes row only |
-| F06 | Missing/wrong API auth **and** invalid IPC senders rejected | Yes | API 401 **PY/UI**; origin 403 **PY/live curl**; IPC allow-list/validation **VT**; sender-frame check **WIN (unverified)** | `assertTrustedSender` runs only in a real Electron window |
-| F07 | App-data / source-root separation | Yes | **PY** (`overlaps_app_data` both directions) | platformdirs app-data outside roots |
-| F08 | Preview clearly labeled + desktop separation enforced | Yes | **PY/UI** (banner, fixture-only, dev/session 404 in desktop, mode select **VT**) | preview transport excluded from desktop build |
-| F09 | One owner of the app-data directory | Yes | Backend flock **PY** (`test_single_instance`); Electron single-instance **WIN (unverified)** | both layers implemented |
+Status categories: **Verified(env)** exercised & passing in the stated environment · **Impl-not-native** implemented, not yet exercised on Windows · **Known-failure** currently failing (none) · **Later-phase** intentionally not implemented.
+
+| ID | Requirement | Status | Evidence |
+|---|---|---|---|
+| F01 | Native launch + backend readiness/build identity | Verified(env) readiness; Impl-not-native launch | Readiness identity + auth probe **VT-proc**; boot+identity **UI**; native window **WIN** |
+| F02 | Startup failure → useful error + retry + diagnostics | Verified(env) preview; Impl-not-native desktop | Preview boot-error+retry **UI**; `bootWithRetry` window/child cleanup, redacted logs, timeout/early-exit/cancel **VT-proc**; native dialog **WIN** |
+| F03 | Native selection + validated registration | Verified(env) logic; Impl-not-native picker | Validation/dedupe/overlap **PY**, register flow **UI**; native dialog **WIN** |
+| F04 | Restart preserves projects/settings, no reseed | Verified(env) | `test_persistence_across_restart` **PY** + **UI** |
+| F05 | Removal leaves source untouched | Verified(env) | `test_remove_registration_leaves_source_untouched` **PY** + **UI** |
+| F06 | Missing/wrong API auth **and** invalid IPC senders rejected | Verified(env) API+IPC-logic; Impl-not-native in-window | 401 **PY/UI**; origin 403 **PY/live**; operation allow-list + `isTrustedFrame` **VT-unit**; sender-frame enforcement in a real window **WIN** |
+| F07 | App-data / source-root separation | Verified(env) | `overlaps_app_data` both directions **PY** |
+| F08 | Preview labeled + desktop separation enforced | Verified(env) | banner/fixture-only/dev-session-404-in-desktop/mode-select **PY/UI/VT-unit**; desktop build excludes preview code (0 hits in dist) |
+| F09 | One owner of the app-data directory | Verified(env) backend; Impl-not-native native | flock `test_single_instance` **PY**; Electron single-instance **WIN** |
 
 **Explicitly unverified (open gates), each with what it needs:**
 | Gate | Needs |
@@ -60,6 +62,15 @@ Verification environment key: **PY** = pytest on Python 3.11 (preview) **and** 3
 | G-10/G-11 | Code signing / measured performance |
 
 A mocked platform op or preview screenshot never closes a WIN gate.
+
+**Known failures:** none.
+
+### Test counts (correction pass, June 2026)
+- Backend `pytest`: **24 passed / 0 failed / 0 skipped** on Python **3.11** and **3.13** (excludes external-ingress `test_external_preview.py`). Command: `python -m pytest tests/ --ignore=tests/test_external_preview.py`.
+- Desktop `vitest` (Node 24): **19 passed** (ipc 8, protocol 4, backend-process 7 as real Node child/HTTP).
+- Frontend `vitest` (Node 24): **6 passed**; `tsc --noEmit` + `VITE_ASGARD_MODE=desktop vite build`: pass; desktop build contains **0** `dev/session`/`PreviewTransport` occurrences.
+- Desktop `tsc --noEmit` + esbuild bundle (Node 24): pass; `dist/preload.js` has 0 local `require`.
+- Lockfiles: `backend/uv.lock` (545), `frontend/package-lock.json` (5321), `desktop/package-lock.json` (2805).
 
 ---
 

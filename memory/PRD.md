@@ -33,3 +33,6 @@ G-1 renderer isolation/IPC-in-window · G-2 loopback+stdin-secret in-process + s
 
 ## Next task
 Await Phase 1 review. On approval, begin Phase 2 (safe snapshot + real inventory) only.
+
+## Phase 1 correction pass 2 (2026-06)
+Desktop foundation hardened: esbuild-bundled sandbox preload (no local require); custom `app://` protocol serving packaged assets (traversal-rejecting, SPA fallback), CSP scoped to app origin; backend readiness now validates schema identity + authenticated probe with per-request abort + overall deadline, handles spawn/early-exit/EPIPE/cancel, redacted bounded logs, idempotent stop, retry without window/child accumulation; IPC changed from path-prefix to explicit operation allow-list + body validation + exact main-frame/origin sender check; preview origin policy now same-origin + exact allow-list (no suffix wildcard/blanket localhost); invalid ASGARD_MODE raises (no silent preview). Desktop-mode build verified to exclude preview code (0 hits). Lockfiles: backend/uv.lock, frontend/package-lock.json, desktop/package-lock.json. Tests: backend 24 (3.11+3.13), desktop vitest 19, frontend vitest 6. Windows/Electron gates G-1..G-4 remain not-natively-run.

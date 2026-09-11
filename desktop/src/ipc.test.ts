@@ -1,40 +1,65 @@
 import { describe, it, expect } from "vitest";
-import { validateApiRequest, ALLOWED_METHODS, ALLOWED_PATH_RE, IPC } from "./ipc";
+import {
+  resolveOperation,
+  validateBody,
+  validateApiRequest,
+  isTrustedFrame,
+  IpcValidationError,
+  IPC,
+} from "./ipc";
+import { APP_INDEX_URL } from "./protocol";
 
-describe("IPC request allow-list (bridge validation)", () => {
-  it("accepts allowed method + versioned path", () => {
-    expect(validateApiRequest("get", "/api/v1/projects")).toEqual({
-      method: "GET",
-      path: "/api/v1/projects",
-    });
-    expect(validateApiRequest("POST", "/api/v1/projects").method).toBe("POST");
-    expect(validateApiRequest("DELETE", "/api/v1/projects/abc123").path).toBe(
-      "/api/v1/projects/abc123"
-    );
+describe("IPC operation allow-list (not a prefix filter)", () => {
+  it("accepts exactly the approved operations", () => {
+    expect(resolveOperation("GET", "/api/v1/projects").name).toBe("listProjects");
+    expect(resolveOperation("post", "/api/v1/projects").name).toBe("createProject");
+    expect(resolveOperation("DELETE", "/api/v1/projects/" + "a".repeat(32)).name).toBe("removeProject");
+    expect(resolveOperation("GET", "/api/v1/diagnostics").name).toBe("diagnostics");
   });
 
-  it("rejects methods that are not allow-listed", () => {
-    expect(() => validateApiRequest("PUT", "/api/v1/projects")).toThrow();
-    expect(() => validateApiRequest("OPTIONS", "/api/v1/projects")).toThrow();
-    expect(() => validateApiRequest(123, "/api/v1/projects")).toThrow();
+  it("rejects unsupported operations under /api/v1 (the old prefix hole)", () => {
+    expect(() => resolveOperation("DELETE", "/api/v1/not-an-approved-operation")).toThrow(IpcValidationError);
+    expect(() => resolveOperation("GET", "/api/v1/projects/extra/segment")).toThrow();
+    expect(() => resolveOperation("POST", "/api/v1/diagnostics")).toThrow(); // method mismatch
   });
 
-  it("rejects paths outside /api/v1", () => {
-    expect(() => validateApiRequest("GET", "/etc/passwd")).toThrow();
-    expect(() => validateApiRequest("GET", "/api/v2/projects")).toThrow();
-    expect(() => validateApiRequest("GET", "http://evil.example/api/v1/x")).toThrow();
-    expect(() => validateApiRequest("GET", 42)).toThrow();
+  it("rejects malformed identifiers and traversal", () => {
+    expect(() => resolveOperation("GET", "/api/v1/projects/not-a-hex-id")).toThrow();
+    expect(() => resolveOperation("GET", "/api/v1/projects/" + "a".repeat(10))).toThrow();
+    expect(() => resolveOperation("GET", "/api/v1/../../secret")).toThrow();
   });
 
-  it("rejects path traversal attempts", () => {
-    expect(() => validateApiRequest("GET", "/api/v1/../../secret")).toThrow();
+  it("validates create/update bodies and rejects unexpected/oversized fields", () => {
+    const create = resolveOperation("POST", "/api/v1/projects");
+    expect(validateBody(create, { name: "ok", fixture_id: "py-fastapi-sample" })).toBeTruthy();
+    expect(() => validateBody(create, {})).toThrow(); // missing name
+    expect(() => validateBody(create, { name: "ok", bogus: 1 })).toThrow(); // unexpected field
+    expect(() => validateBody(create, { name: "x".repeat(5000) })).toThrow(); // too long
+    const update = resolveOperation("PATCH", "/api/v1/projects/" + "b".repeat(32));
+    expect(() => validateBody(update, { status: "weird" })).toThrow();
+    expect(validateBody(update, { status: "archived" })).toBeTruthy();
   });
 
-  it("exposes a stable, minimal channel set", () => {
-    expect(Object.values(IPC).sort()).toEqual(
-      ["asgard:handshake", "asgard:request", "asgard:selectFolder"].sort()
-    );
-    expect([...ALLOWED_METHODS].sort()).toEqual(["DELETE", "GET", "PATCH", "POST"]);
-    expect(ALLOWED_PATH_RE.test("/api/v1/preview/fixtures")).toBe(true);
+  it("full validateApiRequest happy path", () => {
+    const v = validateApiRequest("POST", "/api/v1/projects", { name: "A", fixture_id: "f" });
+    expect(v.method).toBe("POST");
   });
+});
+
+describe("IPC sender-frame trust (scheme alone is insufficient)", () => {
+  it("accepts only the exact main app frame URL", () => {
+    expect(isTrustedFrame(APP_INDEX_URL, true, APP_INDEX_URL)).toBe(true);
+  });
+  it("rejects sub-frames, wrong URLs, and scheme-only matches", () => {
+    expect(isTrustedFrame(APP_INDEX_URL, false, APP_INDEX_URL)).toBe(false); // not main frame
+    expect(isTrustedFrame("app://asgard/evil.html", true, APP_INDEX_URL)).toBe(false);
+    expect(isTrustedFrame("app://evil/index.html", true, APP_INDEX_URL)).toBe(false);
+    expect(isTrustedFrame(undefined, true, APP_INDEX_URL)).toBe(false);
+  });
+});
+
+it("exposes a minimal channel set", () => {
+  expect(Object.values(IPC).sort()).toEqual(
+    ["asgard:handshake", "asgard:request", "asgard:selectFolder"].sort()
+  );
 });

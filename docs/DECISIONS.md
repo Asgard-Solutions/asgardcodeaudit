@@ -47,6 +47,17 @@ Phase 1 desktop foundation, SQLite persistence, and project registration are imp
 
 No tension changed the architecture or the SQLite/desktop decisions. C-3/C-4 moved *toward* stricter spec adherence at the user's explicit direction.
 
+### 8.7 Desktop-foundation correction pass (June 2026)
+Root causes fixed after a deeper review:
+- **Preload load path:** sandboxed preload previously did a runtime `require("./ipc")`. Now **bundled with esbuild** (`dist/preload.js`, `electron` external, 0 local requires). `sandbox/contextIsolation/nodeIntegration=false` kept.
+- **Renderer protocol:** replaced `loadFile` with a custom **`app://asgard/`** protocol (registered privileged/secure/standard) serving only packaged `dist` assets, rejecting `..` traversal, with SPA fallback to `index.html`. CSP `default-src 'self'` now scopes to the app origin; renderer reaches the backend only via IPC (`connect-src 'self'`).
+- **Backend readiness/lifecycle:** readiness now validates a **schema-defined identity** (`status=ready`, name, `mode=desktop`) **and an authenticated `/build` probe with the per-launch secret**; per-request `AbortSignal.timeout` + overall deadline; handles spawn error, early exit, EPIPE on stdin, cancellation; **bounded, redacted** stdout/stderr ring buffer; idempotent SIGTERM→SIGKILL `stop()`; a failed start reaps its own child; `bootWithRetry` destroys the window/child each attempt (no accumulation).
+- **IPC boundary:** replaced the `/api/v1` **prefix regex** with an explicit **operation allow-list** (exact method+route, 32-hex id, per-op body validation: required/unknown/oversized fields). Sender check now requires the **exact top-level app frame URL** (`APP_INDEX_URL`) and main-frame (`parent===null`), not just a `file://`/`app://` scheme.
+- **Origin/session boundary:** dropped the `*.preview.emergentagent.com` **suffix wildcard** and blanket localhost. A token is issued only to an **exact approved origin** or a **same-origin** request (scheme+host+port compared against the ingress-forwarded `X-Forwarded-Proto`+`Host`). CORS uses the same explicit allow-list. Verified live: same-origin→200, foreign/sibling→403. Ground truth: the ingress rewrites both Origin and Host to `code-evidence-tool.cluster-11.preview.emergentcf.cloud`, so same-origin comparison is what makes the preview work while rejecting cross-site.
+- **Invalid mode:** `ASGARD_MODE` set to anything other than `preview`/`desktop` now **raises at startup** (no silent coercion to preview). Unset still defaults to preview.
+- **Desktop-build exclusion evidence:** a `VITE_ASGARD_MODE=desktop` production build contains **0** occurrences of `dev/session` or `PreviewTransport` in `dist/assets` (checked, not merely assumed from dynamic import).
+- **Lockfiles delivered:** `backend/uv.lock`, `frontend/package-lock.json`, `desktop/package-lock.json`. Windows **PowerShell** run instructions in `desktop/README.md` (not Bash).
+
 ---
 
 

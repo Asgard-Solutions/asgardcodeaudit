@@ -4,14 +4,16 @@
   "private": true,
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "tsc -p tsconfig.json && electron dist/main.js",
-    "start": "electron dist/main.js",
+    "bundle": "node build.mjs",
+    "build": "node build.mjs && tsc --noEmit -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "dev": "node build.mjs && electron dist/main.js",
+    "start": "electron dist/main.js",
     "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "esbuild": "^0.24.0",
     "electron": "^33.2.1",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

@@ -59,21 +59,47 @@ def test_reactivation_cannot_create_second_active_root(make_client, tmp_path):
         assert conflict.json()["detail"]["code"] == "duplicate_root"
 
 
-# --- Preview dev-session origin boundary ------------------------------------
+# --- Preview dev-session origin boundary (exact origin / same-origin only) ---
 
-def test_dev_session_rejects_foreign_origin(make_client):
-    with make_client("preview", origins=["http://good.example"]) as c:
-        bad = c.post("/api/v1/dev/session", headers={"Origin": "http://evil.example"})
-        assert bad.status_code == 403
-
-        good = c.post("/api/v1/dev/session", headers={"Origin": "http://good.example"})
-        assert good.status_code == 200
-        token = good.json()["token"]
-        # the legitimately issued token works
+def test_dev_session_rejects_foreign_and_sibling_origins(make_client):
+    with make_client("preview", origins=["https://app.example"]) as c:
+        # approved exact origin
+        ok = c.post("/api/v1/dev/session", headers={"Origin": "https://app.example"})
+        assert ok.status_code == 200
+        token = ok.json()["token"]
         assert c.get("/api/v1/projects", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+        # unrelated origin
+        assert c.post("/api/v1/dev/session", headers={"Origin": "https://evil.example"}).status_code == 403
+        # unapproved sibling on a shared hosting suffix must NOT be granted a token
+        assert c.post("/api/v1/dev/session", headers={"Origin": "https://other.app.example"}).status_code == 403
+
+
+def test_dev_session_same_origin_allowed_but_port_and_scheme_matter(make_client):
+    with make_client("preview", origins=[]) as c:
+        # TestClient own origin is http://testserver
+        assert c.post("/api/v1/dev/session", headers={"Origin": "http://testserver"}).status_code == 200
+        # different port => not same-origin
+        assert c.post("/api/v1/dev/session", headers={"Origin": "http://testserver:9999"}).status_code == 403
+        # different scheme => not same-origin
+        assert c.post("/api/v1/dev/session", headers={"Origin": "https://testserver"}).status_code == 403
+        # malformed origin
+        assert c.post("/api/v1/dev/session", headers={"Origin": "not-a-url"}).status_code == 403
 
 
 def test_dev_session_without_origin_is_allowed(make_client):
-    # local tooling / same-origin GET without an Origin header
-    with make_client("preview", origins=["http://good.example"]) as c:
+    # documented non-browser / same-origin GET access (no Origin header)
+    with make_client("preview", origins=["https://app.example"]) as c:
         assert c.post("/api/v1/dev/session").status_code == 200
+
+
+def test_invalid_mode_is_rejected(monkeypatch):
+    from app import config as cfg
+
+    monkeypatch.setenv("ASGARD_MODE", "bogus")
+    cfg.get_settings.cache_clear()
+    import pytest
+
+    with pytest.raises(ValueError):
+        cfg.Settings()
+    monkeypatch.delenv("ASGARD_MODE", raising=False)
+    cfg.get_settings.cache_clear()

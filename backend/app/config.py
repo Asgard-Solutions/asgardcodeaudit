@@ -22,9 +22,17 @@ APP_DIR_NAME = "AsgardCodeAudit"
 
 class Settings:
     def __init__(self) -> None:
-        self.mode: str = os.environ.get("ASGARD_MODE", "preview").strip().lower()
-        if self.mode not in ("preview", "desktop"):
-            self.mode = "preview"
+        raw_mode = os.environ.get("ASGARD_MODE")
+        if raw_mode is None:
+            self.mode = "preview"  # default only when UNSET
+        else:
+            m = raw_mode.strip().lower()
+            if m not in ("preview", "desktop"):
+                raise ValueError(
+                    f"Invalid ASGARD_MODE {raw_mode!r}; expected 'preview' or 'desktop'. "
+                    "A desktop launch must not silently become a preview service."
+                )
+            self.mode = m
 
         override = os.environ.get("ASGARD_DATA_DIR")
         if override:
@@ -32,50 +40,32 @@ class Settings:
         else:
             self.data_dir = Path(platformdirs.user_data_dir(APP_DIR_NAME, appauthor=False)).resolve()
 
-        # Allowed browser origins for the preview harness (comma-separated).
-        # In desktop mode the renderer uses IPC, so this is empty/ignored.
+        # Explicitly approved deployment origins (exact scheme://host[:port]),
+        # comma-separated. No hosting-domain suffix wildcard and no blanket
+        # localhost: a token is issued only to an approved origin or to a genuine
+        # same-origin request (Origin tuple == this deployment's own origin).
         self.preview_origins = [
-            o.strip()
+            o.strip().rstrip("/")
             for o in os.environ.get("ASGARD_PREVIEW_ORIGINS", "").split(",")
             if o.strip()
         ]
-        # Trusted hostname suffixes for the platform preview domain. A same-origin
-        # request or a request from these controlled domains may obtain a dev
-        # session token; genuinely foreign sites are rejected.
-        self.preview_origin_suffixes = [
-            s.strip()
-            for s in os.environ.get(
-                "ASGARD_PREVIEW_ORIGIN_SUFFIXES", "preview.emergentagent.com"
-            ).split(",")
-            if s.strip()
-        ]
 
-    def origin_allowed(self, origin: str | None, host_header: str | None) -> bool:
-        from urllib.parse import urlparse
-
+    def origin_allowed(self, origin: str | None, host_header: str | None, proto: str | None) -> bool:
+        # No Origin header => not a cross-site browser request (documented
+        # non-browser / same-origin GET access). An Origin header is never
+        # treated as user authentication.
         if origin is None:
-            return True  # non-browser / same-origin GET without an Origin header
-        host = (urlparse(origin).hostname or "").lower()
+            return True
+        origin = origin.rstrip("/")
         if origin in self.preview_origins:
             return True
-        if host in ("localhost", "127.0.0.1"):
-            return True
+        # Same-origin: the request's own origin, reconstructed from the
+        # (ingress-forwarded) scheme + Host, must match the Origin tuple exactly.
         if host_header:
-            if host == host_header.split(":")[0].lower():
-                return True  # same-origin
-        for suf in self.preview_origin_suffixes:
-            if host == suf or host.endswith("." + suf):
+            own = f"{(proto or 'https').lower()}://{host_header}".rstrip("/")
+            if origin == own:
                 return True
         return False
-
-    def cors_origin_regex(self) -> str | None:
-        parts = []
-        for suf in self.preview_origin_suffixes:
-            esc = suf.replace(".", r"\.")
-            parts.append(rf"https?://([a-z0-9-]+\.)*{esc}(:\d+)?")
-        parts.append(r"http://localhost(:\d+)?")
-        parts.append(r"http://127\.0\.0\.1(:\d+)?")
-        return "^(" + "|".join(parts) + ")$" if parts else None
 
     @property
     def is_desktop(self) -> bool:

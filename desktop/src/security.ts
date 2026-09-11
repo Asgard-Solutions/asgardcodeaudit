@@ -1,8 +1,4 @@
-import { BrowserWindow, session, shell } from "electron";
-
-// Renderer hardening. All windows are sandboxed, context-isolated, and cannot
-// integrate Node. Navigation and window creation are locked down, and a strict
-// Content-Security-Policy is applied to the app's responses.
+import { BrowserWindow, session } from "electron";
 
 export function secureWebPreferences(preloadPath: string) {
   return {
@@ -16,7 +12,10 @@ export function secureWebPreferences(preloadPath: string) {
   };
 }
 
-export function applyContentSecurityPolicy(loopbackOrigin: string) {
+// Documents are served from the app:// origin, so 'self' scopes to the packaged
+// app. The renderer talks to the backend only through IPC, so no loopback HTTP
+// origin is granted to the page.
+export function applyContentSecurityPolicy() {
   session.defaultSession.webRequest.onHeadersReceived((details, cb) => {
     cb({
       responseHeaders: {
@@ -28,7 +27,7 @@ export function applyContentSecurityPolicy(loopbackOrigin: string) {
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
             "font-src 'self' https://fonts.gstatic.com",
             "img-src 'self' data:",
-            `connect-src 'self' ${loopbackOrigin}`,
+            "connect-src 'self'",
             "object-src 'none'",
             "frame-ancestors 'none'",
             "base-uri 'none'",
@@ -40,11 +39,7 @@ export function applyContentSecurityPolicy(loopbackOrigin: string) {
 }
 
 export function lockDownNavigation(win: BrowserWindow) {
-  // Deny all attempts to open new windows.
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  // Block in-app navigation away from the loaded app.
   win.webContents.on("will-navigate", (event) => event.preventDefault());
-  // External links (if any are ever added) go to the OS browser, not the app.
   win.webContents.on("will-redirect", (event) => event.preventDefault());
-  void shell; // available for explicit, reviewed external-open flows only
 }
